@@ -16,7 +16,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerProvider("agentrouter", {
     baseUrl: "https://agentrouter.org/v1",
     api: "openai-completions",
-    apiKey: "$AGENTROUTER_API_KEY",
+    // No apiKey here: users supply one via /login agentrouter, their own
+    // models.json entry, or an apiKey field in an extension override.
+    // Putting a key here would SHADOW one configured in models.json.
     headers: {
       "Originator": "codex_cli_rs",
       "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
