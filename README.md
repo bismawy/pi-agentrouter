@@ -12,10 +12,14 @@ Both are reasoning models; `gpt-5.6-sol` supports `low/medium/high/xhigh` thinki
 ## Install
 
 ```
-pi install git:github.com/bismawy/pi-extension-agentrouter
+pi install npm:pi-extension-agentrouter
 ```
 
-(or `pi install npm:pi-extension-agentrouter` once published to npm)
+Alternatively, straight from GitHub:
+
+```
+pi install git:github.com/bismawy/pi-extension-agentrouter
+```
 
 ## Setup
 
