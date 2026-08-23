@@ -55,10 +55,14 @@ export default function (pi: ExtensionAPI) {
         contextWindow: 200000,
         maxTokens: 8192,
         thinkingLevelMap: {
+          low: "low",
+          medium: "medium",
+          high: "high",
           xhigh: "xhigh",
         },
         compat: {
           supportsDeveloperRole: false,
+          cacheControlFormat: "anthropic",
         },
       },
     ],
