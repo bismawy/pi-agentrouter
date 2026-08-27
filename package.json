@@ -1,7 +1,7 @@
 {
   "name": "pi-extension-agentrouter",
-  "version": "1.0.2",
-  "description": "AgentRouter provider for pi — routes to GPT-5.6 Sol and Claude Opus 5",
+  "version": "1.0.3",
+  "description": "AgentRouter provider for pi — routes to GPT-5.6 Sol, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3",
   "type": "module",
   "keywords": [
     "pi-package",
