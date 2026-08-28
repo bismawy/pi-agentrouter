@@ -6,7 +6,7 @@
  *
  * Setup:
  *   1. Set AGENTROUTER_API_KEY environment variable
- *   2. Install: pi install ./pi-extension-agentrouter
+ *   2. Install: pi install npm:@bismawy/pi-agentrouter
  *   3. /model → select agentrouter/gpt-5.6-sol, agentrouter/claude-opus-5,
  *      agentrouter/deepseek-v4-flash, or agentrouter/glm-5.3
  */

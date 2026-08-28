@@ -1,4 +1,4 @@
-# pi-extension-agentrouter
+# pi-agentrouter
 
 A [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension that registers [AgentRouter](https://agentrouter.org) as a custom provider with the following models:
 
@@ -14,13 +14,13 @@ All models are reasoning-capable with `low/medium/high/xhigh` thinking level map
 ## Install
 
 ```
-pi install npm:pi-extension-agentrouter
+pi install npm:@bismawy/pi-agentrouter
 ```
 
 Alternatively, straight from GitHub:
 
 ```
-pi install git:github.com/bismawy/pi-extension-agentrouter
+pi install git:github.com/bismawy/pi-agentrouter
 ```
 
 ## Setup
