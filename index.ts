@@ -270,11 +270,12 @@ export default function (pi: ExtensionAPI) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 131072,
         maxTokens: 8192,
+        // Backend only accepts low/high/max (always-on thinking)
         thinkingLevelMap: {
           low: "low",
-          medium: "medium",
+          medium: "high",
           high: "high",
-          xhigh: "xhigh",
+          xhigh: "max",
         },
         compat: {
           supportsDeveloperRole: false,
