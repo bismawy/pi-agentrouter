@@ -153,6 +153,7 @@ function isHideable(msg: Record<string, unknown>): boolean {
 const redactSet = new Set<string>();
 let escalatePending = false;
 let sessionAnchor: string | null = null;
+let escalateBatch = 1;
 
 function apply(payload: { messages: unknown[] }): void {
   const messages = payload.messages;
@@ -164,6 +165,7 @@ function apply(payload: { messages: unknown[] }): void {
     if (!firstContact) {
       redactSet.clear();
       escalatePending = false;
+      escalateBatch = 1;
     }
   }
   const lastUser = lastUserIndex(messages);
@@ -178,7 +180,9 @@ function apply(payload: { messages: unknown[] }): void {
   }
   if (escalatePending) {
     escalatePending = false;
-    for (let i = lastUser - 1; i >= 0; i--) {
+    let budget = escalateBatch;
+    escalateBatch = Math.min(escalateBatch * 2, 60);
+    for (let i = lastUser - 1; i >= 0 && redactSet.size < 60 && budget > 0; i--) {
       if (!isRecordV(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
       if (redactSet.has(fps[i])) continue;
       redactSet.add(fps[i]);
@@ -187,7 +191,7 @@ function apply(payload: { messages: unknown[] }): void {
       const copy = messages[i] as Record<string, unknown>;
       if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
       else redactBlocks(copy.content);
-      break;
+      budget--;
     }
   }
 }
@@ -224,6 +228,16 @@ if ((hist2[4].content as { content: string }[])[0].content !== REDACTED_NOTE) {
   throw new Error("culprit did not stay redacted");
 }
 
+// exponential escalation: second WAF block hides 2 more (assistant answer + earliest user)
+escalatePending = true;
+const hist3 = sessionKeep.map((m) => structuredClone(m));
+apply({ messages: hist3 });
+if (hist3[5].content !== origNewest) throw new Error("2nd escalation redacted newest");
+if ((hist3[2].content as { text: string }[])[0].text !== REDACTED_NOTE) {
+  throw new Error("2nd escalation did not hide the assistant answer");
+}
+if (hist3[1].content !== REDACTED_NOTE) throw new Error("2nd escalation did not hide the earliest user");
+
 // /new: first USER message changes → set clears (system-first payload must not pin the anchor)
 const fresh = [
   { role: "system", content: "You are an expert coding assistant operating inside pi." },
@@ -231,5 +245,10 @@ const fresh = [
 ];
 apply({ messages: fresh });
 if (fresh[1].content !== "sesi baru") throw new Error("/new still redacted the new first user turn");
+
+// 1.2.2 auto-retry: the retryable suffix must match pi-ai's RETRYABLE_PROVIDER_ERROR_PATTERN
+// ("provider.?returned.?error") so pi restarts the turn after a WAF block.
+const RETRY_SUFFIX = " (provider returned error — retrying with earlier messages hidden)";
+if (!/provider.?returned.?error/i.test(RETRY_SUFFIX)) throw new Error("retry suffix not retryable-classified");
 
 console.log("ok");
