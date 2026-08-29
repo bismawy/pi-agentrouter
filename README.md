@@ -45,7 +45,8 @@ Then run `/model` and pick your desired model.
 
 - **Separate Endpoints & Protocols**: Automatically splits Claude (Anthropic Messages protocol with Claude Code wire image) and OpenAI/GLM/DeepSeek (OpenAI Completions protocol).
 - **Canonical Pi header (WAF)**: AgentRouter authorizes Pi traffic only when the system prompt starts with `You are an expert coding assistant operating inside pi...`. On the first turn, project `AGENTS.md` often lands *in front* of that line → `400 content-blocked`. This extension moves the header to byte 0 (same approach as [`@madgagarin/pi-agentrouter`](https://pi.dev/packages/@madgagarin/pi-agentrouter)).
-- **Language framing** on the first user turn (non-English prompts).
+- **Language framing** on every user turn (non-English prompts).
+- **WAF recovery (1.2.0)**: after a content-filter block, hide older history one message at a time. The latest user message is never auto-redacted.
 - **Payload sanitization**: ANSI / control chars / lone surrogates.
 - `sendSessionAffinityHeaders: true` preserves session affinity for prompt cache hits.
 
