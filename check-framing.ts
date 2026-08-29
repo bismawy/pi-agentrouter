@@ -62,4 +62,73 @@ if (framedArr[0].text !== LANGUAGE_PREAMBLE) throw new Error("preamble block not
 const idem = prependUserPreamble(framed) as string;
 if (idem !== framed) throw new Error("preamble not idempotent");
 
+// tool_result-led turns must NOT be framed (Anthropic requires them first)
+const trTurn = { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] };
+function isRecordV(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function frameUserTurn(msg: Record<string, unknown>): void {
+  if (Array.isArray(msg.content)) {
+    const head = msg.content[0];
+    if (isRecordV(head) && head.type === "tool_result") return;
+  }
+  msg.content = prependUserPreamble(msg.content);
+}
+const trBefore = JSON.stringify(trTurn);
+frameUserTurn(trTurn);
+if (JSON.stringify(trTurn) !== trBefore) throw new Error("tool_result turn was framed");
+const lateTurn = { role: "user", content: "Kenapa masih error?" };
+frameUserTurn(lateTurn);
+if (lateTurn.content !== `${LANGUAGE_PREAMBLE}\n\nKenapa masih error?`) throw new Error("later turn not framed");
+
+// --- poison redaction self-check ---
+const REDACTED_NOTE =
+  "[Message redacted automatically: AgentRouter's content filter blocked it as containing sensitive words.]";
+function redactBlocks(content: unknown): void {
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (!isRecordV(block)) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      block.text = REDACTED_NOTE;
+    } else if (block.type === "tool_result") {
+      if (typeof block.content === "string") block.content = REDACTED_NOTE;
+      else if (Array.isArray(block.content)) {
+        for (const b of block.content) {
+          if (isRecordV(b) && b.type === "text" && typeof b.text === "string") b.text = REDACTED_NOTE;
+        }
+      }
+    }
+  }
+}
+function redactFromEnd(messages: Record<string, unknown>[], depth: number): void {
+  let remaining = depth;
+  for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "user") continue;
+    if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
+    else redactBlocks(msg.content);
+    remaining--;
+  }
+}
+
+const hist = [
+  { role: "user", content: "pertanyaan awal" },
+  { role: "assistant", content: [{ type: "text", text: "jawaban" }] },
+  { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: {} }] },
+  { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "output sensitive_word" }] },
+  { role: "user", content: "lanjut dengan sensitive_word" },
+];
+redactFromEnd(hist, 1);
+if (hist[4].content !== REDACTED_NOTE) throw new Error("poison message not redacted");
+if (hist[3].content[0].content !== "output sensitive_word") throw new Error("tool_result redacted too early");
+if (hist[0].content !== "pertanyaan awal") throw new Error("innocent early message was redacted");
+if (hist[2].content[0].type !== "tool_use") throw new Error("assistant tool_use corrupted");
+
+// depth escalation reaches the earlier tool_result message on the next failure
+redactFromEnd(hist, 2);
+if (hist[3].content[0].type !== "tool_result" || hist[3].content[0].content !== REDACTED_NOTE) {
+  throw new Error("escalation did not redact tool_result / pairing broken");
+}
+if (hist[0].content !== "pertanyaan awal") throw new Error("escalation over-redacted");
+
 console.log("ok");

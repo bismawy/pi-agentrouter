@@ -1,6 +1,6 @@
 {
   "name": "@bismawy/pi-agentrouter",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "description": "AgentRouter provider for pi — routes to GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3",
   "type": "module",
   "keywords": [
