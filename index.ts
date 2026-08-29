@@ -160,6 +160,11 @@ const redactSet = new Set<string>();
 let escalatePending = false;
 let exhausted = false;
 let sessionAnchor: string | null = null;
+// Exponential escalation: pi only auto-retries ~3 times, so each retry must
+// hide more history (1, 2, 4, ...) or a multi-message Indonesian history can
+// never get under the WAF language-ratio threshold.
+let escalateBatch = 1;
+let wafNotified = false;
 
 function fingerprintOf(msg: Record<string, unknown>): string {
   return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}`;
@@ -247,6 +252,8 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
       redactSet.clear();
       escalatePending = false;
       exhausted = false;
+      escalateBatch = 1;
+      wafNotified = false;
     }
   }
 
@@ -263,13 +270,15 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
 
   if (escalatePending) {
     escalatePending = false;
-    for (let i = lastUser - 1; i >= 0 && redactSet.size < MAX_REDACTED; i--) {
+    let budget = escalateBatch;
+    escalateBatch = Math.min(escalateBatch * 2, MAX_REDACTED);
+    for (let i = lastUser - 1; i >= 0 && redactSet.size < MAX_REDACTED && budget > 0; i--) {
       if (!isRecord(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
       if (redactSet.has(fps[i])) continue;
       redactSet.add(fps[i]);
       if (!hasRedactableText((messages[i] as Record<string, unknown>).content)) continue;
       redactMessageAt(messages, i);
-      break;
+      budget--;
     }
   }
 
@@ -453,6 +462,7 @@ export default function (pi: ExtensionAPI) {
   // Mutate payload.messages copies (return undefined). Cloning the whole payload
   // drops provider fields; copying only message objects keeps session state clean.
   pi.on("before_provider_request", (event, ctx) => {
+
     if (!event.payload) return;
     const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
@@ -467,6 +477,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_end", (event, ctx) => {
     const message = event.message;
+    if (message.role === "assistant" && message.stopReason !== "error") wafNotified = false;
     if (message.role !== "assistant" || message.stopReason !== "error") return;
     const provider = message.provider ?? ctx.model?.provider;
     if (!provider?.toLowerCase().includes("agentrouter")) return;
@@ -475,18 +486,34 @@ export default function (pi: ExtensionAPI) {
     if (!WAF_BLOCK_RE.test(errorMessage)) return;
     escalatePending = true;
     if (exhausted) {
-      ctx.ui.notify(
-        "AgentRouter content filter keeps blocking even with earlier messages hidden. " +
-          "Your latest message is likely the trigger — please rephrase or split it.",
-        "warning",
-      );
+      if (!wafNotified) {
+        wafNotified = true;
+        ctx.ui.notify(
+          "AgentRouter content filter keeps blocking even with earlier messages hidden. " +
+            "Your latest message is likely the trigger — please rephrase (e.g. in English) or split it.",
+          "warning",
+        );
+      }
       return;
     }
-    ctx.ui.notify(
-      `AgentRouter content filter blocked the request. ` +
-        `Hiding ${redactSet.size || "one more"} earlier message(s) on the next try. ` +
-        `Your latest message is kept.`,
-      "warning",
-    );
+    if (!wafNotified) {
+      wafNotified = true;
+      ctx.ui.notify(
+        `AgentRouter content filter blocked the request. ` +
+          `Retrying automatically with earlier messages hidden. ` +
+          `Your latest message is kept.`,
+        "warning",
+      );
+    }
+    // Mark the error as retryable so pi auto-restarts the turn: pi's retry
+    // classifier (pi-ai isRetryableAssistantError) matches "provider returned
+    // error". Each retry re-enters before_provider_request, which escalates
+    // the redaction by one more message until the language-ratio WAF passes.
+    return {
+      message: {
+        ...message,
+        errorMessage: `${errorMessage} (provider returned error — retrying with earlier messages hidden)`,
+      },
+    };
   });
 }
