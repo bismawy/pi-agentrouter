@@ -139,7 +139,7 @@ function patchAgentRouterPayload(payload: unknown): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  // 1. OpenAI-compatible models (gpt-5.6-sol, gpt-5.5, glm-5.3, glm-5.2, deepseek)
+  // 1. OpenAI-compatible models (gpt-5.6-sol, deepseek-v4-flash, glm-5.3)
   pi.registerProvider("agentrouter", {
     baseUrl: "https://agentrouter.org/v1",
     api: "openai-completions",
@@ -287,7 +287,7 @@ export default function (pi: ExtensionAPI) {
     const errorMessage = message.errorMessage ?? "";
     if (errorMessage.includes("content-blocked")) {
       ctx.ui.notify(
-        "AgentRouter content-blocked: WAF butuh header kanonik Pi di byte 0 system prompt. /reload lalu /new.",
+        "AgentRouter content-blocked: WAF requires canonical Pi header at byte 0 of system prompt. Run /reload then /new.",
         "warning",
       );
     }
