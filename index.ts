@@ -2,13 +2,13 @@
  * AgentRouter Provider Extension for pi
  *
  * Registers AgentRouter (https://agentrouter.org) as a custom provider
- * with GPT-5.6 Sol, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3 models.
+ * with GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3 models.
  *
  * Setup:
  *   1. Set AGENTROUTER_API_KEY environment variable
  *   2. Install: pi install npm:@bismawy/pi-agentrouter
- *   3. /model → select agentrouter/gpt-5.6-sol, agentrouter/claude-opus-5,
- *      agentrouter/deepseek-v4-flash, or agentrouter/glm-5.3
+ *   3. /model → select agentrouter/gpt-5.6-sol, agentrouter-anthropic/claude-opus-4-8,
+ *      agentrouter-anthropic/claude-opus-5, agentrouter/deepseek-v4-flash, or agentrouter/glm-5.3
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -110,7 +110,7 @@ function isAgentRouterCall(payload: unknown, provider?: string, baseUrl?: string
   if (provider?.toLowerCase().includes("agentrouter")) return true;
   if (baseUrl?.toLowerCase().includes("agentrouter.org")) return true;
   if (!isRecord(payload) || typeof payload.model !== "string") return false;
-  return /gpt-5\.|glm-5\.|deepseek-v|claude-opus|claude-haiku/.test(payload.model);
+  return /gpt-5\.|glm-5\.|deepseek-v|claude-opus/.test(payload.model);
 }
 
 function patchAgentRouterPayload(payload: unknown): void {
@@ -171,46 +171,8 @@ export default function (pi: ExtensionAPI) {
         },
       },
       {
-        id: "gpt-5.5",
-        name: "GPT-5.5 (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 272000,
-        maxTokens: 16384,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          supportsDeveloperRole: false,
-        },
-      },
-      {
         id: "deepseek-v4-flash",
         name: "DeepSeek V4 Flash (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 8192,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          supportsDeveloperRole: false,
-          requiresReasoningContentOnAssistantMessages: true,
-          thinkingFormat: "deepseek",
-        },
-      },
-      {
-        id: "deepseek-v3.2",
-        name: "DeepSeek V3.2 (AgentRouter)",
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -245,29 +207,11 @@ export default function (pi: ExtensionAPI) {
         compat: {
           supportsDeveloperRole: false,
         },
-      },
-      {
-        id: "glm-5.2",
-        name: "GLM 5.2 (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 8192,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          supportsDeveloperRole: false,
-        },
-      },
+      }
     ],
   });
 
-  // 2. Anthropic Messages API models (claude-opus-4-6, claude-opus-5, claude-haiku)
+  // 2. Anthropic Messages API models (claude-opus-4-8, claude-opus-5)
   pi.registerProvider("agentrouter-anthropic", {
     baseUrl: "https://agentrouter.org",
     api: "anthropic-messages",
@@ -285,8 +229,8 @@ export default function (pi: ExtensionAPI) {
     },
     models: [
       {
-        id: "claude-opus-4-6",
-        name: "Claude Opus 4.6 (AgentRouter)",
+        id: "claude-opus-4-8",
+        name: "Claude Opus 4.8 (AgentRouter)",
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -321,26 +265,7 @@ export default function (pi: ExtensionAPI) {
           supportsDeveloperRole: false,
           cacheControlFormat: "anthropic",
         },
-      },
-      {
-        id: "claude-haiku-4-5-20251001",
-        name: "Claude Haiku 4.5 (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 8192,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          supportsDeveloperRole: false,
-          cacheControlFormat: "anthropic",
-        },
-      },
+      }
     ],
   });
 
