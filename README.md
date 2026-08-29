@@ -8,7 +8,7 @@ Routes GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a 
 [![npm](https://img.shields.io/npm/v/@bismawy/pi-agentrouter)](https://www.npmjs.com/package/@bismawy/pi-agentrouter)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-![pi-agentrouter](./assets/screenshot.webp)
+![pi-agentrouter](./assets/screenshot.png)
 
 ---
 
