@@ -8,18 +8,14 @@ A [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension
 | Model | Context | Input |
 |---|---|---|
 | `agentrouter/gpt-5.6-sol` | 272k | text, image |
-| `agentrouter/gpt-5.5` | 272k | text, image |
-| `agentrouter/glm-5.3` | 131k | text, image |
-| `agentrouter/glm-5.2` | 131k | text, image |
 | `agentrouter/deepseek-v4-flash` | 131k | text, image |
-| `agentrouter/deepseek-v3.2` | 131k | text, image |
+| `agentrouter/glm-5.3` | 131k | text, image |
 
 #### Anthropic Messages (`agentrouter-anthropic/`) — `https://agentrouter.org`
 | Model | Context | Input |
 |---|---|---|
-| `agentrouter-anthropic/claude-opus-4-6` | 200k | text, image |
+| `agentrouter-anthropic/claude-opus-4-8` | 200k | text, image |
 | `agentrouter-anthropic/claude-opus-5` | 200k | text, image |
-| `agentrouter-anthropic/claude-haiku-4-5-20251001` | 200k | text, image |
 
 All models are reasoning-capable with `low/medium/high/xhigh` thinking level mappings.
 
