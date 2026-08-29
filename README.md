@@ -8,8 +8,8 @@ A [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension
 | Model | Context | Input |
 |---|---|---|
 | `agentrouter/gpt-5.6-sol` | 272k | text, image |
-| `agentrouter/deepseek-v4-flash` | 131k | text, image |
-| `agentrouter/glm-5.3` | 131k | text, image |
+| `agentrouter/deepseek-v4-flash` | 131k | text |
+| `agentrouter/glm-5.3` | 131k | text |
 
 #### Anthropic Messages (`agentrouter-anthropic/`) — `https://agentrouter.org`
 | Model | Context | Input |
@@ -46,7 +46,7 @@ Then run `/model` and pick your desired model.
 - **Separate Endpoints & Protocols**: Automatically splits Claude (Anthropic Messages protocol with Claude Code wire image) and OpenAI/GLM/DeepSeek (OpenAI Completions protocol).
 - **Canonical Pi header (WAF)**: AgentRouter authorizes Pi traffic only when the system prompt starts with `You are an expert coding assistant operating inside pi...`. On the first turn, project `AGENTS.md` often lands *in front* of that line → `400 content-blocked`. This extension moves the header to byte 0 (same approach as [`@madgagarin/pi-agentrouter`](https://pi.dev/packages/@madgagarin/pi-agentrouter)).
 - **Language framing** on every user turn (non-English prompts).
-- **WAF recovery (1.2.0)**: after a content-filter block, hide older history one message at a time. The latest user message is never auto-redacted.
+- **WAF recovery (1.2.x)**: AgentRouter's content filter scores the *whole request body* with a fuzzy language classifier. After a block, the extension marks the error as retryable so Pi restarts the turn automatically, escalating history redaction exponentially (1 → 2 → 4 hidden messages per retry). The latest user message is never auto-redacted. History-triggered blocks recover invisibly; a single very long non-English message can still be blocked by AgentRouter itself — you'll get one clear notice to rephrase or split it.
 - **Payload sanitization**: ANSI / control chars / lone surrogates.
 - `sendSessionAffinityHeaders: true` preserves session affinity for prompt cache hits.
 
