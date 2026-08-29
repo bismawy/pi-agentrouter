@@ -1,14 +1,16 @@
 /**
  * AgentRouter Provider Extension for pi
  *
- * Registers AgentRouter (https://agentrouter.org) as a custom provider
- * with GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3 models.
+ * Registers AgentRouter (https://agentrouter.org) as a single custom provider
+ * with GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3.
+ * Claude models use per-model api/baseUrl/header overrides (anthropic-messages);
+ * the rest ride the provider-level openai-completions config.
  *
  * Setup:
- *   1. Set AGENTROUTER_API_KEY environment variable
+ *   1. /login agentrouter  (or set AGENTROUTER_API_KEY)
  *   2. Install: pi install npm:@bismawy/pi-agentrouter
- *   3. /model → select agentrouter/gpt-5.6-sol, agentrouter-anthropic/claude-opus-4-8,
- *      agentrouter-anthropic/claude-opus-5, agentrouter/deepseek-v4-flash, or agentrouter/glm-5.3
+ *   3. /model → agentrouter/gpt-5.6-sol, agentrouter/claude-opus-4-8,
+ *      agentrouter/claude-opus-5, agentrouter/deepseek-v4-flash, agentrouter/glm-5.3
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -211,9 +213,9 @@ function patchAgentRouterPayload(payload: unknown): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  // 1. OpenAI-compatible models (gpt-5.6-sol, deepseek-v4-flash, glm-5.3)
   pi.registerProvider("agentrouter", {
     baseUrl: "https://agentrouter.org/v1",
+    apiKey: "$AGENTROUTER_API_KEY",
     api: "openai-completions",
     headers: {
       "Originator": "codex_cli_rs",
@@ -280,27 +282,8 @@ export default function (pi: ExtensionAPI) {
         compat: {
           supportsDeveloperRole: false,
         },
-      }
-    ],
-  });
-
-  // 2. Anthropic Messages API models (claude-opus-4-8, claude-opus-5)
-  pi.registerProvider("agentrouter-anthropic", {
-    baseUrl: "https://agentrouter.org",
-    api: "anthropic-messages",
-    headers: {
-      "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
-      "anthropic-dangerous-direct-browser-access": "true",
-      "x-app": "cli",
-    },
-    compat: {
-      supportsDeveloperRole: false,
-      cacheControlFormat: "anthropic",
-      sendSessionAffinityHeaders: true,
-    },
-    models: [
+      },
+      // Claude models ride the Anthropic Messages API via per-model overrides
       {
         id: "claude-opus-4-8",
         name: "Claude Opus 4.8 (AgentRouter)",
@@ -309,6 +292,16 @@ export default function (pi: ExtensionAPI) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
         maxTokens: 8192,
+        api: "anthropic-messages",
+        baseUrl: "https://agentrouter.org",
+        headers: {
+          "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta":
+            "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "x-app": "cli",
+        },
         thinkingLevelMap: {
           low: "low",
           medium: "medium",
@@ -318,6 +311,7 @@ export default function (pi: ExtensionAPI) {
         compat: {
           supportsDeveloperRole: false,
           cacheControlFormat: "anthropic",
+          sendSessionAffinityHeaders: true,
         },
       },
       {
@@ -328,6 +322,16 @@ export default function (pi: ExtensionAPI) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
         maxTokens: 8192,
+        api: "anthropic-messages",
+        baseUrl: "https://agentrouter.org",
+        headers: {
+          "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta":
+            "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
+          "anthropic-dangerous-direct-browser-access": "true",
+          "x-app": "cli",
+        },
         thinkingLevelMap: {
           low: "low",
           medium: "medium",
@@ -337,8 +341,9 @@ export default function (pi: ExtensionAPI) {
         compat: {
           supportsDeveloperRole: false,
           cacheControlFormat: "anthropic",
+          sendSessionAffinityHeaders: true,
         },
-      }
+      },
     ],
   });
 
