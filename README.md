@@ -1,5 +1,7 @@
 # pi-agentrouter
 
+![pi-agentrouter](./assets/screenshot.webp)
+
 A [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension that registers [AgentRouter](https://agentrouter.org) as a unified custom provider (`agentrouter/`).
 
 ### Models (`agentrouter/`)
