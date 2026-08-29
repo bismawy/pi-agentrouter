@@ -113,6 +113,77 @@ function isAgentRouterCall(payload: unknown, provider?: string, baseUrl?: string
   return /gpt-5\.|glm-5\.|deepseek-v|claude-opus/.test(payload.model);
 }
 
+/**
+ * Prepend the language preamble to a user turn, unless the content starts
+ * with a tool_result block (Anthropic requires those to lead the message).
+ */
+function frameUserTurn(msg: Record<string, unknown>): void {
+  if (Array.isArray(msg.content)) {
+    const head = msg.content[0];
+    if (isRecord(head) && head.type === "tool_result") return;
+  }
+  msg.content = prependUserPreamble(msg.content);
+}
+
+// --- Poisoned-history auto-recovery ---------------------------------------
+// The WAF scans the FULL request body every turn, so one blocked message
+// poisons the whole session: every retry re-sends it and fails again.
+// Recovery: on each WAF block, escalate a redaction depth; on every outgoing
+// request, replace the content of the last N user messages with a placeholder.
+// Progressive escalation converges on the culprit without knowing which
+// message contains the flagged text.
+const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
+const REDACTED_NOTE =
+  "[Message redacted automatically: AgentRouter's content filter blocked it as containing sensitive words.]";
+const MAX_REDACT_DEPTH = 20;
+
+let redactDepth = 0;
+let sessionAnchor: string | null = null;
+
+// ponytail: anchor = fingerprint of first message; /new or compaction changes it → depth resets
+function anchorOf(messages: unknown[]): string {
+  const first = messages[0];
+  if (!isRecord(first)) return String(messages.length);
+  return `${first.role}:${JSON.stringify(first.content).slice(0, 200)}`;
+}
+
+function redactBlocks(content: unknown): void {
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      block.text = REDACTED_NOTE;
+    } else if (block.type === "tool_result") {
+      // keep the block (tool_use pairing must survive), replace its content
+      if (typeof block.content === "string") block.content = REDACTED_NOTE;
+      else if (Array.isArray(block.content)) {
+        for (const b of block.content) {
+          if (isRecord(b) && b.type === "text" && typeof b.text === "string") b.text = REDACTED_NOTE;
+        }
+      }
+    }
+  }
+}
+
+function applyPoisonRedaction(payload: Record<string, unknown>): void {
+  const messages = payload.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  const anchor = anchorOf(messages);
+  if (anchor !== sessionAnchor) {
+    sessionAnchor = anchor;
+    redactDepth = 0;
+  }
+  if (redactDepth <= 0) return;
+  let remaining = redactDepth;
+  for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
+    const msg = messages[i];
+    if (!isRecord(msg) || msg.role !== "user") continue;
+    if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
+    else redactBlocks(msg.content);
+    remaining--;
+  }
+}
+
 function patchAgentRouterPayload(payload: unknown): void {
   if (!isRecord(payload)) return;
 
@@ -132,10 +203,11 @@ function patchAgentRouterPayload(payload: unknown): void {
     first.content = enforceCanonicalRootPrompt(first.content);
   }
 
-  const firstUser = payload.messages.find(
-    (m): m is Record<string, unknown> => isRecord(m) && m.role === "user",
-  );
-  if (firstUser) firstUser.content = prependUserPreamble(firstUser.content);
+  // The WAF inspects user content beyond the opening turn (later Indonesian
+  // turns and compacted history get blocked too), so frame EVERY user message.
+  for (const msg of payload.messages) {
+    if (isRecord(msg) && msg.role === "user") frameUserTurn(msg);
+  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -275,6 +347,7 @@ export default function (pi: ExtensionAPI) {
     const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
     sanitizeInPlace(event.payload);
+    applyPoisonRedaction(event.payload);
     patchAgentRouterPayload(event.payload);
   });
 
@@ -285,9 +358,12 @@ export default function (pi: ExtensionAPI) {
     if (!provider?.toLowerCase().includes("agentrouter")) return;
 
     const errorMessage = message.errorMessage ?? "";
-    if (errorMessage.includes("content-blocked")) {
+    if (WAF_BLOCK_RE.test(errorMessage)) {
+      redactDepth = Math.min(redactDepth + 1, MAX_REDACT_DEPTH);
       ctx.ui.notify(
-        "AgentRouter content-blocked: WAF requires canonical Pi header at byte 0 of system prompt. Run /reload then /new.",
+        `AgentRouter WAF blocked this conversation (sensitive words). ` +
+          `The next request will auto-redact the last ${redactDepth} user message(s) — ` +
+          `the blocked text is now in history, so please rephrase it.`,
         "warning",
       );
     }
