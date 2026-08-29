@@ -81,16 +81,56 @@ const lateTurn = { role: "user", content: "Kenapa masih error?" };
 frameUserTurn(lateTurn);
 if (lateTurn.content !== `${LANGUAGE_PREAMBLE}\n\nKenapa masih error?`) throw new Error("later turn not framed");
 
-// --- poison redaction self-check ---
-const REDACTED_NOTE =
-  "[Message redacted automatically: AgentRouter's content filter blocked it as containing sensitive words.]";
+// --- 1.2.0 poison redaction: skip newest user, sticky fps, WAF-neutral note ---
+const REDACTED_NOTE = "[Message withheld by local policy]";
+if (/sensitive|blocked/i.test(REDACTED_NOTE)) throw new Error("placeholder not WAF-neutral");
+
+function copyMessage(msg: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...msg };
+  if (Array.isArray(msg.content)) {
+    copy.content = msg.content.map((b) => {
+      if (!isRecordV(b)) return b;
+      const bc = { ...b };
+      if (Array.isArray(b.content)) {
+        bc.content = b.content.map((c) => (isRecordV(c) ? { ...c } : c));
+      }
+      return bc;
+    });
+  }
+  return copy;
+}
+function fingerprintOf(msg: Record<string, unknown>): string {
+  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}`;
+}
+function firstUserAnchor(messages: unknown[]): string {
+  for (const m of messages) {
+    if (isRecordV(m) && m.role === "user") return fingerprintOf(m);
+  }
+  return String(messages.length);
+}
+function hasRedactableText(content: unknown): boolean {
+  if (typeof content === "string") return content.length > 0;
+  if (!Array.isArray(content)) return false;
+  for (const b of content) {
+    if (!isRecordV(b)) continue;
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) return true;
+    if (b.type === "tool_result") {
+      if (typeof b.content === "string" && b.content.length > 0) return true;
+      if (Array.isArray(b.content)) {
+        for (const c of b.content) {
+          if (isRecordV(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 function redactBlocks(content: unknown): void {
   if (!Array.isArray(content)) return;
   for (const block of content) {
     if (!isRecordV(block)) continue;
-    if (block.type === "text" && typeof block.text === "string") {
-      block.text = REDACTED_NOTE;
-    } else if (block.type === "tool_result") {
+    if (block.type === "text" && typeof block.text === "string") block.text = REDACTED_NOTE;
+    else if (block.type === "tool_result") {
       if (typeof block.content === "string") block.content = REDACTED_NOTE;
       else if (Array.isArray(block.content)) {
         for (const b of block.content) {
@@ -100,35 +140,96 @@ function redactBlocks(content: unknown): void {
     }
   }
 }
-function redactFromEnd(messages: Record<string, unknown>[], depth: number): void {
-  let remaining = depth;
-  for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== "user") continue;
-    if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
-    else redactBlocks(msg.content);
-    remaining--;
+function lastUserIndex(messages: unknown[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isRecordV(messages[i]) && (messages[i] as Record<string, unknown>).role === "user") return i;
+  }
+  return -1;
+}
+function isHideable(msg: Record<string, unknown>): boolean {
+  return msg.role === "user" || msg.role === "assistant";
+}
+
+const redactSet = new Set<string>();
+let escalatePending = false;
+let sessionAnchor: string | null = null;
+
+function apply(payload: { messages: unknown[] }): void {
+  const messages = payload.messages;
+  const fps = messages.map((m) => (isRecordV(m) ? fingerprintOf(m) : ""));
+  const anchor = firstUserAnchor(messages);
+  if (anchor !== sessionAnchor) {
+    const firstContact = sessionAnchor === null;
+    sessionAnchor = anchor;
+    if (!firstContact) {
+      redactSet.clear();
+      escalatePending = false;
+    }
+  }
+  const lastUser = lastUserIndex(messages);
+  for (let i = 0; i < lastUser; i++) {
+    if (!isRecordV(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+    if (redactSet.has(fps[i])) {
+      messages[i] = copyMessage(messages[i] as Record<string, unknown>);
+      const copy = messages[i] as Record<string, unknown>;
+      if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
+      else redactBlocks(copy.content);
+    }
+  }
+  if (escalatePending) {
+    escalatePending = false;
+    for (let i = lastUser - 1; i >= 0; i--) {
+      if (!isRecordV(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+      if (redactSet.has(fps[i])) continue;
+      redactSet.add(fps[i]);
+      if (!hasRedactableText((messages[i] as Record<string, unknown>).content)) continue;
+      messages[i] = copyMessage(messages[i] as Record<string, unknown>);
+      const copy = messages[i] as Record<string, unknown>;
+      if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
+      else redactBlocks(copy.content);
+      break;
+    }
   }
 }
 
+const origNewest = "lanjut pertanyaan baru";
 const hist = [
+  { role: "system", content: "You are an expert coding assistant operating inside pi." },
   { role: "user", content: "pertanyaan awal" },
   { role: "assistant", content: [{ type: "text", text: "jawaban" }] },
   { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: {} }] },
   { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "output sensitive_word" }] },
-  { role: "user", content: "lanjut dengan sensitive_word" },
+  { role: "user", content: origNewest },
 ];
-redactFromEnd(hist, 1);
-if (hist[4].content !== REDACTED_NOTE) throw new Error("poison message not redacted");
-if (hist[3].content[0].content !== "output sensitive_word") throw new Error("tool_result redacted too early");
-if (hist[0].content !== "pertanyaan awal") throw new Error("innocent early message was redacted");
-if (hist[2].content[0].type !== "tool_use") throw new Error("assistant tool_use corrupted");
+const sessionKeep = hist.map((m) => structuredClone(m));
 
-// depth escalation reaches the earlier tool_result message on the next failure
-redactFromEnd(hist, 2);
-if (hist[3].content[0].type !== "tool_result" || hist[3].content[0].content !== REDACTED_NOTE) {
-  throw new Error("escalation did not redact tool_result / pairing broken");
+escalatePending = true;
+apply({ messages: hist });
+// 1.2.0: newest user turn is NEVER swallowed (1.0.7 Bug A)
+if (hist[5].content !== origNewest) throw new Error("newest user message was redacted");
+if (hist[0].content !== sessionKeep[0].content) throw new Error("system prompt was redacted");
+// first hideable older message from the end = tool_result user turn
+if ((hist[4].content as { content: string }[])[0].content !== REDACTED_NOTE) {
+  throw new Error("escalation did not hide the previous user turn");
 }
-if (hist[0].content !== "pertanyaan awal") throw new Error("escalation over-redacted");
+if ((hist[4].content as { type: string }[])[0].type !== "tool_result") throw new Error("tool_result pairing broken");
+if (hist[1].content !== "pertanyaan awal") throw new Error("innocent early user was redacted on first escalate");
+if ((hist[3].content as { type: string }[])[0].type !== "tool_use") throw new Error("assistant tool_use corrupted");
+
+// sticky: next request without escalate keeps the culprit hidden, newest still intact
+const hist2 = sessionKeep.map((m) => structuredClone(m));
+apply({ messages: hist2 });
+if (hist2[5].content !== origNewest) throw new Error("sticky pass redacted newest");
+if ((hist2[4].content as { content: string }[])[0].content !== REDACTED_NOTE) {
+  throw new Error("culprit did not stay redacted");
+}
+
+// /new: first USER message changes → set clears (system-first payload must not pin the anchor)
+const fresh = [
+  { role: "system", content: "You are an expert coding assistant operating inside pi." },
+  { role: "user", content: "sesi baru" },
+];
+apply({ messages: fresh });
+if (fresh[1].content !== "sesi baru") throw new Error("/new still redacted the new first user turn");
 
 console.log("ok");

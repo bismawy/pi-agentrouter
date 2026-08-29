@@ -104,8 +104,23 @@ function prependUserPreamble(content: unknown): unknown {
   if (!Array.isArray(content)) return content;
   const head = content[0];
   if (isRecord(head) && head.type === "text" && head.text === LANGUAGE_PREAMBLE) return content;
-  content.unshift({ type: "text", text: LANGUAGE_PREAMBLE });
-  return content;
+  return [{ type: "text", text: LANGUAGE_PREAMBLE }, ...content];
+}
+
+/** Shallow-copy a message so in-place edits never touch pi session objects. */
+function copyMessage(msg: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...msg };
+  if (Array.isArray(msg.content)) {
+    copy.content = msg.content.map((b) => {
+      if (!isRecord(b)) return b;
+      const bc = { ...b };
+      if (Array.isArray(b.content)) {
+        bc.content = b.content.map((c) => (isRecord(c) ? { ...c } : c));
+      }
+      return bc;
+    });
+  }
+  return copy;
 }
 
 function isAgentRouterCall(payload: unknown, provider?: string, baseUrl?: string): boolean {
@@ -127,26 +142,56 @@ function frameUserTurn(msg: Record<string, unknown>): void {
   msg.content = prependUserPreamble(msg.content);
 }
 
-// --- Poisoned-history auto-recovery ---------------------------------------
+// --- Poisoned-history auto-recovery (1.2.0) --------------------------------
 // The WAF scans the FULL request body every turn, so one blocked message
-// poisons the whole session: every retry re-sends it and fails again.
-// Recovery: on each WAF block, escalate a redaction depth; on every outgoing
-// request, replace the content of the last N user messages with a placeholder.
-// Progressive escalation converges on the culprit without knowing which
-// message contains the flagged text.
+// poisons the session until it is hidden. 1.0.7 redacted last-N user messages
+// from the end — after one block, the NEWEST user turn was always swallowed.
+// 1.2.0: NEVER redact the newest user turn. Hide older messages one-by-one
+// (sticky fingerprints) until the request passes; those stay hidden. If the
+// newest turn itself is the trigger, notify the user to rephrase.
 const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
-const REDACTED_NOTE =
-  "[Message redacted automatically: AgentRouter's content filter blocked it as containing sensitive words.]";
-const MAX_REDACT_DEPTH = 20;
+// ponytail: placeholder must stay WAF-neutral — earlier text mentioning the
+// filter's own vocabulary ("sensitive words", "blocked") re-triggered the WAF,
+// making the deepest redaction level fail by design.
+const REDACTED_NOTE = "[Message withheld by local policy]";
+const MAX_REDACTED = 60;
 
-let redactDepth = 0;
+const redactSet = new Set<string>();
+let escalatePending = false;
+let exhausted = false;
 let sessionAnchor: string | null = null;
 
-// ponytail: anchor = fingerprint of first message; /new or compaction changes it → depth resets
-function anchorOf(messages: unknown[]): string {
-  const first = messages[0];
-  if (!isRecord(first)) return String(messages.length);
-  return `${first.role}:${JSON.stringify(first.content).slice(0, 200)}`;
+function fingerprintOf(msg: Record<string, unknown>): string {
+  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}`;
+}
+
+// First USER message, skipping system/developer — those are constant so they
+// never reset across /new (1.0.7 Bug A).
+function firstUserAnchor(messages: unknown[]): string {
+  for (const m of messages) {
+    if (isRecord(m) && m.role === "user") return fingerprintOf(m);
+  }
+  return String(messages.length);
+}
+
+function hasRedactableText(content: unknown): boolean {
+  if (typeof content === "string") return content.length > 0;
+  if (!Array.isArray(content)) return false;
+  for (const b of content) {
+    if (!isRecord(b)) continue;
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) return true;
+    if (b.type === "tool_result") {
+      if (typeof b.content === "string" && b.content.length > 0) return true;
+      if (Array.isArray(b.content)) {
+        for (const c of b.content) {
+          if (isRecord(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function redactBlocks(content: unknown): void {
@@ -156,7 +201,6 @@ function redactBlocks(content: unknown): void {
     if (block.type === "text" && typeof block.text === "string") {
       block.text = REDACTED_NOTE;
     } else if (block.type === "tool_result") {
-      // keep the block (tool_use pairing must survive), replace its content
       if (typeof block.content === "string") block.content = REDACTED_NOTE;
       else if (Array.isArray(block.content)) {
         for (const b of block.content) {
@@ -167,22 +211,78 @@ function redactBlocks(content: unknown): void {
   }
 }
 
+function lastUserIndex(messages: unknown[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isRecord(messages[i]) && (messages[i] as Record<string, unknown>).role === "user") return i;
+  }
+  return -1;
+}
+
+function isHideable(msg: Record<string, unknown>): boolean {
+  return msg.role === "user" || msg.role === "assistant";
+}
+
+function redactMessageAt(messages: unknown[], i: number): void {
+  const msg = messages[i];
+  if (!isRecord(msg)) return;
+  if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
+  else redactBlocks(msg.content);
+}
+
 function applyPoisonRedaction(payload: Record<string, unknown>): void {
   const messages = payload.messages;
   if (!Array.isArray(messages) || messages.length === 0) return;
-  const anchor = anchorOf(messages);
+
+  // Fingerprints of originals — after copy+redact the content changes, so the
+  // set would never match the mutated copies (1.0.7-style false exhausted).
+  const fps = messages.map((m) => (isRecord(m) ? fingerprintOf(m) : ""));
+
+  const anchor = firstUserAnchor(messages);
   if (anchor !== sessionAnchor) {
+    // First contact just adopts the anchor; only a real change (e.g. /new or
+    // compaction) resets state — otherwise a pending escalation is lost.
+    const firstContact = sessionAnchor === null;
     sessionAnchor = anchor;
-    redactDepth = 0;
+    if (!firstContact) {
+      redactSet.clear();
+      escalatePending = false;
+      exhausted = false;
+    }
   }
-  if (redactDepth <= 0) return;
-  let remaining = redactDepth;
-  for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
-    const msg = messages[i];
-    if (!isRecord(msg) || msg.role !== "user") continue;
-    if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
-    else redactBlocks(msg.content);
-    remaining--;
+
+  if (redactSet.size > 0 && !fps.some((fp) => fp && redactSet.has(fp))) {
+    redactSet.clear();
+  }
+
+  const lastUser = lastUserIndex(messages);
+
+  for (let i = 0; i < lastUser; i++) {
+    if (!isRecord(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+    if (redactSet.has(fps[i])) redactMessageAt(messages, i);
+  }
+
+  if (escalatePending) {
+    escalatePending = false;
+    for (let i = lastUser - 1; i >= 0 && redactSet.size < MAX_REDACTED; i--) {
+      if (!isRecord(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+      if (redactSet.has(fps[i])) continue;
+      redactSet.add(fps[i]);
+      if (!hasRedactableText((messages[i] as Record<string, unknown>).content)) continue;
+      redactMessageAt(messages, i);
+      break;
+    }
+  }
+
+  exhausted = lastUser <= 0;
+  if (!exhausted) {
+    exhausted = true;
+    for (let i = 0; i < lastUser; i++) {
+      if (!isRecord(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+      if (!redactSet.has(fps[i])) {
+        exhausted = false;
+        break;
+      }
+    }
   }
 }
 
@@ -248,7 +348,8 @@ export default function (pi: ExtensionAPI) {
         id: "deepseek-v4-flash",
         name: "DeepSeek V4 Flash (AgentRouter)",
         reasoning: true,
-        input: ["text", "image"],
+        // AgentRouter backend rejects images for this model ("This model does not support image")
+        input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 131072,
         maxTokens: 8192,
@@ -268,7 +369,9 @@ export default function (pi: ExtensionAPI) {
         id: "glm-5.3",
         name: "GLM 5.3 (AgentRouter)",
         reasoning: true,
-        input: ["text", "image"],
+        // AgentRouter backend is text-only here: image_url blocks get
+        // "***.***.type 参数非法，取值范围 ['text']" 400 errors
+        input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 131072,
         maxTokens: 8192,
@@ -347,14 +450,19 @@ export default function (pi: ExtensionAPI) {
     ],
   });
 
-  // Mutate in place (return undefined). Cloning the payload drops provider fields.
+  // Mutate payload.messages copies (return undefined). Cloning the whole payload
+  // drops provider fields; copying only message objects keeps session state clean.
   pi.on("before_provider_request", (event, ctx) => {
     if (!event.payload) return;
     const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
-    sanitizeInPlace(event.payload);
-    applyPoisonRedaction(event.payload);
-    patchAgentRouterPayload(event.payload);
+    const payload = event.payload as Record<string, unknown>;
+    if (Array.isArray(payload.messages)) {
+      payload.messages = payload.messages.map((m) => (isRecord(m) ? copyMessage(m) : m));
+    }
+    sanitizeInPlace(payload);
+    applyPoisonRedaction(payload);
+    patchAgentRouterPayload(payload);
   });
 
   pi.on("message_end", (event, ctx) => {
@@ -364,14 +472,21 @@ export default function (pi: ExtensionAPI) {
     if (!provider?.toLowerCase().includes("agentrouter")) return;
 
     const errorMessage = message.errorMessage ?? "";
-    if (WAF_BLOCK_RE.test(errorMessage)) {
-      redactDepth = Math.min(redactDepth + 1, MAX_REDACT_DEPTH);
+    if (!WAF_BLOCK_RE.test(errorMessage)) return;
+    escalatePending = true;
+    if (exhausted) {
       ctx.ui.notify(
-        `AgentRouter WAF blocked this conversation (sensitive words). ` +
-          `The next request will auto-redact the last ${redactDepth} user message(s) — ` +
-          `the blocked text is now in history, so please rephrase it.`,
+        "AgentRouter content filter keeps blocking even with earlier messages hidden. " +
+          "Your latest message is likely the trigger — please rephrase or split it.",
         "warning",
       );
+      return;
     }
+    ctx.ui.notify(
+      `AgentRouter content filter blocked the request. ` +
+        `Hiding ${redactSet.size || "one more"} earlier message(s) on the next try. ` +
+        `Your latest message is kept.`,
+      "warning",
+    );
   });
 }
