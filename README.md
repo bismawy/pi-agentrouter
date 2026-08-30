@@ -26,7 +26,7 @@ Provide your AgentRouter API key through any of the following methods:
 - Environment variable: `export AGENTROUTER_API_KEY="your-api-key"`
 - In `~/.pi/agent/models.json` under `providers.agentrouter.apiKey`
 
-> 💡 **Need an account?** Register here: [AgentRouter Sign Up (Referral)](https://agentrouter.org/register?aff=CKdn)
+> 🎁 **Need an account?** Register via [AgentRouter Sign Up (Referral)](https://agentrouter.org/register?aff=CKdn) to get a **$50.00 bonus reward** (transferable to your account balance).
 
 ### 3. Switch Model
 Run `/model` and pick any `agentrouter/<model-id>` (e.g. `agentrouter/gpt-5.6-sol`).
