@@ -23,7 +23,7 @@
     "extensions": [
       "./index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/bismawy/pi-extension-agentrouter/main/assets/screenshot.webp"
+    "image": "https://raw.githubusercontent.com/bismawy/pi-agentrouter/main/assets/screenshot.webp"
   },
   "imports": {
     "#extension": "./index.ts"
@@ -33,6 +33,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bismawy/pi-extension-agentrouter.git"
+    "url": "git+https://github.com/bismawy/pi-agentrouter.git"
   }
 }
