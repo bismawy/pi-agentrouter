@@ -60,7 +60,7 @@ const PI_HEADER_RE =
   /(?:You are [^\n\r]*operating inside pi[^\n\r]*\n?|You are (?:pi|Pi)[^\n\r]*\n?)/i;
 
 const LANGUAGE_PREAMBLE =
-  "[Instruction: Process the user request below and respond in the appropriate language.]";
+  "[Instruction: You are an expert coding assistant operating inside pi. Please carefully analyze the technical context, understand the user request, follow all project instructions and coding standards, and respond thoroughly in the requested language.]";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -102,8 +102,13 @@ function prependUserPreamble(content: unknown): unknown {
     return content ? `${LANGUAGE_PREAMBLE}\n\n${content}` : LANGUAGE_PREAMBLE;
   }
   if (!Array.isArray(content)) return content;
+  if (content.length === 0) return [{ type: "text", text: LANGUAGE_PREAMBLE }];
   const head = content[0];
-  if (isRecord(head) && head.type === "text" && head.text === LANGUAGE_PREAMBLE) return content;
+  if (isRecord(head) && head.type === "text" && typeof head.text === "string") {
+    if (head.text.startsWith(LANGUAGE_PREAMBLE)) return content;
+    head.text = `${LANGUAGE_PREAMBLE}\n\n${head.text}`;
+    return content;
+  }
   return [{ type: "text", text: LANGUAGE_PREAMBLE }, ...content];
 }
 
@@ -142,28 +147,25 @@ function frameUserTurn(msg: Record<string, unknown>): void {
   msg.content = prependUserPreamble(msg.content);
 }
 
-// --- Poisoned-history auto-recovery (1.2.0) --------------------------------
-// The WAF scans the FULL request body every turn, so one blocked message
-// poisons the session until it is hidden. 1.0.7 redacted last-N user messages
-// from the end — after one block, the NEWEST user turn was always swallowed.
-// 1.2.0: NEVER redact the newest user turn. Hide older messages one-by-one
-// (sticky fingerprints) until the request passes; those stay hidden. If the
-// newest turn itself is the trigger, notify the user to rephrase.
+// --- Poisoned-history auto-recovery (1.3.0) --------------------------------
+// The WAF scans the FULL request body every turn, and cumulative non-English
+// user tokens trip `400 content-blocked`. 1.0.7 redacted last-N user messages
+// from the end; 1.2.2 escalated 1->2->4 messages (exhausting pi's 3 retries
+// on sessions with >7 messages).
+// 1.3.0: NEVER redact the newest user turn. On escalation:
+//   Stage 1: Redact ALL older user turns in one shot (primary WAF trigger).
+//   Stage 2: Redact ALL older assistant turns if needed.
+// Fingerprints stay sticky across subsequent turns in the same session.
 const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
 // ponytail: placeholder must stay WAF-neutral — earlier text mentioning the
-// filter's own vocabulary ("sensitive words", "blocked") re-triggered the WAF,
-// making the deepest redaction level fail by design.
+// filter's own vocabulary ("sensitive words", "blocked") re-triggered the WAF.
 const REDACTED_NOTE = "[Message withheld by local policy]";
-const MAX_REDACTED = 60;
+const MAX_REDACTED = 1000;
 
 const redactSet = new Set<string>();
 let escalatePending = false;
 let exhausted = false;
 let sessionAnchor: string | null = null;
-// Exponential escalation: pi only auto-retries ~3 times, so each retry must
-// hide more history (1, 2, 4, ...) or a multi-message Indonesian history can
-// never get under the WAF language-ratio threshold.
-let escalateBatch = 1;
 let wafNotified = false;
 
 function fingerprintOf(msg: Record<string, unknown>): string {
@@ -252,7 +254,6 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
       redactSet.clear();
       escalatePending = false;
       exhausted = false;
-      escalateBatch = 1;
       wafNotified = false;
     }
   }
@@ -270,15 +271,32 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
 
   if (escalatePending) {
     escalatePending = false;
-    let budget = escalateBatch;
-    escalateBatch = Math.min(escalateBatch * 2, MAX_REDACTED);
-    for (let i = lastUser - 1; i >= 0 && redactSet.size < MAX_REDACTED && budget > 0; i--) {
-      if (!isRecord(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+    // Stage 1: Redact ALL older user messages in one shot to eliminate cumulative non-English WAF blocks
+    let anyRedacted = false;
+    for (let i = 0; i < lastUser; i++) {
+      if (!isRecord(messages[i])) continue;
+      const m = messages[i] as Record<string, unknown>;
+      if (m.role !== "user") continue;
       if (redactSet.has(fps[i])) continue;
       redactSet.add(fps[i]);
-      if (!hasRedactableText((messages[i] as Record<string, unknown>).content)) continue;
-      redactMessageAt(messages, i);
-      budget--;
+      if (hasRedactableText(m.content)) {
+        redactMessageAt(messages, i);
+        anyRedacted = true;
+      }
+    }
+    // Stage 2: If all older user messages are already redacted, escalate to older assistant messages
+    if (!anyRedacted) {
+      for (let i = 0; i < lastUser; i++) {
+        if (!isRecord(messages[i])) continue;
+        const m = messages[i] as Record<string, unknown>;
+        if (m.role !== "assistant") continue;
+        if (redactSet.has(fps[i])) continue;
+        redactSet.add(fps[i]);
+        if (hasRedactableText(m.content)) {
+          redactMessageAt(messages, i);
+          anyRedacted = true;
+        }
+      }
     }
   }
 
