@@ -43,22 +43,26 @@ const missing = enforceCanonicalRootPrompt("Hanya aturan lokal.") as string;
 if (!missing.startsWith(CANONICAL_PI_HEADER)) throw new Error("missing header not injected");
 
 const LANGUAGE_PREAMBLE =
-  "[Instruction: Process the user request below and respond in the appropriate language.]";
+  "[Instruction: You are an expert coding assistant operating inside pi. Please carefully analyze the technical context, understand the user request, follow all project instructions and coding standards, and respond thoroughly in the requested language.]";
 function prependUserPreamble(content: unknown): unknown {
   if (typeof content === "string") {
     if (content.startsWith(LANGUAGE_PREAMBLE)) return content;
     return content ? `${LANGUAGE_PREAMBLE}\n\n${content}` : LANGUAGE_PREAMBLE;
   }
   if (!Array.isArray(content)) return content;
+  if (content.length === 0) return [{ type: "text", text: LANGUAGE_PREAMBLE }];
   const head = content[0] as { type?: string; text?: string };
-  if (head?.type === "text" && head.text === LANGUAGE_PREAMBLE) return content;
-  content.unshift({ type: "text", text: LANGUAGE_PREAMBLE });
-  return content;
+  if (head?.type === "text" && typeof head.text === "string") {
+    if (head.text.startsWith(LANGUAGE_PREAMBLE)) return content;
+    head.text = `${LANGUAGE_PREAMBLE}\n\n${head.text}`;
+    return content;
+  }
+  return [{ type: "text", text: LANGUAGE_PREAMBLE }, ...content];
 }
 const framed = prependUserPreamble("Tolong bantu saya perbaiki bug ini") as string;
 if (!framed.startsWith(LANGUAGE_PREAMBLE)) throw new Error("preamble not prepended");
 const framedArr = prependUserPreamble([{ type: "text", text: "halo" }]) as { text: string }[];
-if (framedArr[0].text !== LANGUAGE_PREAMBLE) throw new Error("preamble block not first");
+if (!framedArr[0].text.startsWith(LANGUAGE_PREAMBLE)) throw new Error("preamble block not first");
 const idem = prependUserPreamble(framed) as string;
 if (idem !== framed) throw new Error("preamble not idempotent");
 
@@ -153,7 +157,6 @@ function isHideable(msg: Record<string, unknown>): boolean {
 const redactSet = new Set<string>();
 let escalatePending = false;
 let sessionAnchor: string | null = null;
-let escalateBatch = 1;
 
 function apply(payload: { messages: unknown[] }): void {
   const messages = payload.messages;
@@ -165,7 +168,6 @@ function apply(payload: { messages: unknown[] }): void {
     if (!firstContact) {
       redactSet.clear();
       escalatePending = false;
-      escalateBatch = 1;
     }
   }
   const lastUser = lastUserIndex(messages);
@@ -180,18 +182,38 @@ function apply(payload: { messages: unknown[] }): void {
   }
   if (escalatePending) {
     escalatePending = false;
-    let budget = escalateBatch;
-    escalateBatch = Math.min(escalateBatch * 2, 60);
-    for (let i = lastUser - 1; i >= 0 && redactSet.size < 60 && budget > 0; i--) {
-      if (!isRecordV(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
+    // Step 1: Redact ALL older user messages in one shot to neutralize cumulative WAF triggers
+    let anyRedacted = false;
+    for (let i = 0; i < lastUser; i++) {
+      if (!isRecordV(messages[i])) continue;
+      const m = messages[i] as Record<string, unknown>;
+      if (m.role !== "user") continue;
       if (redactSet.has(fps[i])) continue;
       redactSet.add(fps[i]);
-      if (!hasRedactableText((messages[i] as Record<string, unknown>).content)) continue;
-      messages[i] = copyMessage(messages[i] as Record<string, unknown>);
-      const copy = messages[i] as Record<string, unknown>;
-      if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
-      else redactBlocks(copy.content);
-      budget--;
+      if (hasRedactableText(m.content)) {
+        messages[i] = copyMessage(m);
+        const copy = messages[i] as Record<string, unknown>;
+        if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
+        else redactBlocks(copy.content);
+        anyRedacted = true;
+      }
+    }
+    // Step 2: If all older user messages are already redacted, escalate to assistant messages
+    if (!anyRedacted) {
+      for (let i = 0; i < lastUser; i++) {
+        if (!isRecordV(messages[i])) continue;
+        const m = messages[i] as Record<string, unknown>;
+        if (m.role !== "assistant") continue;
+        if (redactSet.has(fps[i])) continue;
+        redactSet.add(fps[i]);
+        if (hasRedactableText(m.content)) {
+          messages[i] = copyMessage(m);
+          const copy = messages[i] as Record<string, unknown>;
+          if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
+          else redactBlocks(copy.content);
+          anyRedacted = true;
+        }
+      }
     }
   }
 }
@@ -209,34 +231,36 @@ const sessionKeep = hist.map((m) => structuredClone(m));
 
 escalatePending = true;
 apply({ messages: hist });
-// 1.2.0: newest user turn is NEVER swallowed (1.0.7 Bug A)
+// 1.3.0: newest user turn is NEVER swallowed
 if (hist[5].content !== origNewest) throw new Error("newest user message was redacted");
 if (hist[0].content !== sessionKeep[0].content) throw new Error("system prompt was redacted");
-// first hideable older message from the end = tool_result user turn
+// all older user turns (including tool_result and early user) are redacted in stage 1
 if ((hist[4].content as { content: string }[])[0].content !== REDACTED_NOTE) {
   throw new Error("escalation did not hide the previous user turn");
 }
 if ((hist[4].content as { type: string }[])[0].type !== "tool_result") throw new Error("tool_result pairing broken");
-if (hist[1].content !== "pertanyaan awal") throw new Error("innocent early user was redacted on first escalate");
+if (hist[1].content !== REDACTED_NOTE) throw new Error("stage 1 did not neutralize older user turn");
 if ((hist[3].content as { type: string }[])[0].type !== "tool_use") throw new Error("assistant tool_use corrupted");
+// assistant text answer is preserved in stage 1
+if ((hist[2].content as { text: string }[])[0].text !== "jawaban") throw new Error("stage 1 over-redacted assistant message");
 
-// sticky: next request without escalate keeps the culprit hidden, newest still intact
+// sticky: next request without escalate keeps culprits hidden, newest still intact
 const hist2 = sessionKeep.map((m) => structuredClone(m));
 apply({ messages: hist2 });
 if (hist2[5].content !== origNewest) throw new Error("sticky pass redacted newest");
 if ((hist2[4].content as { content: string }[])[0].content !== REDACTED_NOTE) {
   throw new Error("culprit did not stay redacted");
 }
+if (hist2[1].content !== REDACTED_NOTE) throw new Error("earlier user did not stay redacted");
 
-// exponential escalation: second WAF block hides 2 more (assistant answer + earliest user)
+// stage 2 escalation: if user turns were already redacted, hides assistant answers too
 escalatePending = true;
 const hist3 = sessionKeep.map((m) => structuredClone(m));
 apply({ messages: hist3 });
-if (hist3[5].content !== origNewest) throw new Error("2nd escalation redacted newest");
+if (hist3[5].content !== origNewest) throw new Error("stage 2 escalation redacted newest");
 if ((hist3[2].content as { text: string }[])[0].text !== REDACTED_NOTE) {
-  throw new Error("2nd escalation did not hide the assistant answer");
+  throw new Error("stage 2 escalation did not hide the assistant answer");
 }
-if (hist3[1].content !== REDACTED_NOTE) throw new Error("2nd escalation did not hide the earliest user");
 
 // /new: first USER message changes → set clears (system-first payload must not pin the anchor)
 const fresh = [

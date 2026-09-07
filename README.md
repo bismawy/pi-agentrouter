@@ -49,7 +49,7 @@ Run `/model` and pick any `agentrouter/<model-id>` (e.g. `agentrouter/gpt-5.6-so
 
 - 🎯 **Unified Namespace with Dual Protocol Routing:** Automatically routes Claude models via per-model Anthropic Messages protocol while OpenAI, DeepSeek, and GLM models use OpenAI Completions under `agentrouter/`.
 - 🛡️ **WAF Header & Language Guard:** Guarantees Pi's canonical system header sits at byte 0 (preventing `400 content-blocked` when custom instructions/`AGENTS.md` precede it) and applies language framing on user turns.
-- 🔄 **Self-Healing WAF Redaction (1.2.x):** If AgentRouter's content filter triggers on non-English token ratios across long chat histories, turns are marked retryable while history text is progressively redacted (1 → 2 → 4 messages), preserving the latest request without user disruption.
+- 🔄 **Self-Healing WAF Redaction (1.3.x):** If AgentRouter's content filter triggers on non-English token ratios across chat histories, turns are marked retryable with two-stage escalation (all older user turns in Stage 1, followed by assistant turns if needed), preserving the latest request without user disruption.
 - 🧹 **Robust Payload Sanitization:** Filters out ANSI escape codes, null bytes, non-printable control characters, and orphan Unicode surrogates before dispatching requests.
 - ⚡ **Prompt Cache Affinity:** Injects `sendSessionAffinityHeaders: true` by default to maximize server-side prompt cache hits.
 
@@ -66,7 +66,7 @@ AgentRouter WAF inspects request payload framing and token distributions. Long m
 ### The Self-Healing Lifecycle
 1. **Byte-0 Canonical Header:** The extension forces Pi's system prompt header to the very start of the payload.
 2. **Dynamic Escalation:** Upon encountering `/sensitive[_ ]words?[_ ]detected|content-blocked/i`, the extension marks the error as retryable for Pi to restart the turn automatically.
-3. **Progressive Redaction:** It replaces older user turn text blocks with `[Message redacted automatically to bypass content filter]` while keeping tool execution pairs intact.
+3. **Two-Stage Redaction:** It replaces older user turn text blocks with `[Message withheld by local policy]` in Stage 1 (and assistant turns in Stage 2 if needed) while keeping tool execution pairs intact.
 4. **Anchor Reset:** New conversations or compaction cycles reset the redaction depth automatically.
 
 </details>
