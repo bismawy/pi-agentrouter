@@ -157,6 +157,7 @@ function frameUserTurn(msg: Record<string, unknown>): void {
 //   Stage 2: Redact ALL older assistant turns if needed.
 // Fingerprints stay sticky across subsequent turns in the same session.
 const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
+const SENSITIVE_WORDS_RE = /sensitive[_ ]words?[_ ]detected/i;
 // ponytail: placeholder must stay WAF-neutral — earlier text mentioning the
 // filter's own vocabulary ("sensitive words", "blocked") re-triggered the WAF.
 const REDACTED_NOTE = "[Message withheld by local policy]";
@@ -164,12 +165,14 @@ const MAX_REDACTED = 1000;
 
 const redactSet = new Set<string>();
 let escalatePending = false;
+let isSensitiveBlock = false;
 let exhausted = false;
 let sessionAnchor: string | null = null;
 let wafNotified = false;
 
 function fingerprintOf(msg: Record<string, unknown>): string {
-  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}`;
+  const tc = Array.isArray(msg.tool_calls) ? JSON.stringify(msg.tool_calls).slice(0, 80) : "";
+  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}:${tc}`;
 }
 
 // First USER message, skipping system/developer — those are constant so they
@@ -181,20 +184,28 @@ function firstUserAnchor(messages: unknown[]): string {
   return String(messages.length);
 }
 
-function hasRedactableText(content: unknown): boolean {
-  if (typeof content === "string") return content.length > 0;
-  if (!Array.isArray(content)) return false;
-  for (const b of content) {
-    if (!isRecord(b)) continue;
-    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) return true;
-    if (b.type === "tool_result") {
-      if (typeof b.content === "string" && b.content.length > 0) return true;
-      if (Array.isArray(b.content)) {
-        for (const c of b.content) {
-          if (isRecord(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0) {
-            return true;
+function hasRedactableText(content: unknown, msg?: Record<string, unknown>): boolean {
+  if (typeof content === "string") return content.length > 0 && content !== REDACTED_NOTE;
+  if (Array.isArray(content)) {
+    for (const b of content) {
+      if (!isRecord(b)) continue;
+      if (b.type === "text" && typeof b.text === "string" && b.text.length > 0 && b.text !== REDACTED_NOTE) return true;
+      if (b.type === "tool_result") {
+        if (typeof b.content === "string" && b.content.length > 0 && b.content !== REDACTED_NOTE) return true;
+        if (Array.isArray(b.content)) {
+          for (const c of b.content) {
+            if (isRecord(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0 && c.text !== REDACTED_NOTE) {
+              return true;
+            }
           }
         }
+      }
+    }
+  }
+  if (msg && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+    for (const tc of msg.tool_calls) {
+      if (isRecord(tc) && isRecord(tc.function) && typeof tc.function.arguments === "string" && tc.function.arguments !== "{}") {
+        return true;
       }
     }
   }
@@ -226,19 +237,44 @@ function lastUserIndex(messages: unknown[]): number {
 }
 
 function isHideable(msg: Record<string, unknown>): boolean {
-  return msg.role === "user" || msg.role === "assistant";
+  return msg.role === "user" || msg.role === "assistant" || msg.role === "tool";
 }
 
 function redactMessageAt(messages: unknown[], i: number): void {
   const msg = messages[i];
   if (!isRecord(msg)) return;
-  if (typeof msg.content === "string") msg.content = REDACTED_NOTE;
-  else redactBlocks(msg.content);
+  if (typeof msg.content === "string") {
+    msg.content = REDACTED_NOTE;
+  } else if (Array.isArray(msg.content)) {
+    redactBlocks(msg.content);
+  } else if (msg.role === "tool" || msg.role === "assistant") {
+    msg.content = REDACTED_NOTE;
+  }
+  if (Array.isArray(msg.tool_calls)) {
+    for (const tc of msg.tool_calls) {
+      if (isRecord(tc) && isRecord(tc.function) && typeof tc.function.arguments === "string") {
+        tc.function.arguments = "{}";
+      }
+    }
+  }
 }
 
 function applyPoisonRedaction(payload: Record<string, unknown>): void {
   const messages = payload.messages;
   if (!Array.isArray(messages) || messages.length === 0) return;
+
+  // Prune failed assistant messages carrying error status/text in-place so dead error turns do not linger
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!isRecord(m)) continue;
+    if (m.role === "assistant") {
+      if ((m as Record<string, unknown>).stopReason === "error") {
+        messages.splice(i, 1);
+      } else if (typeof m.content === "string" && WAF_BLOCK_RE.test(m.content)) {
+        messages.splice(i, 1);
+      }
+    }
+  }
 
   // Fingerprints of originals — after copy+redact the content changes, so the
   // set would never match the mutated copies (1.0.7-style false exhausted).
@@ -253,6 +289,7 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
     if (!firstContact) {
       redactSet.clear();
       escalatePending = false;
+      isSensitiveBlock = false;
       exhausted = false;
       wafNotified = false;
     }
@@ -271,30 +308,45 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
 
   if (escalatePending) {
     escalatePending = false;
-    // Stage 1: Redact ALL older user messages in one shot to eliminate cumulative non-English WAF blocks
-    let anyRedacted = false;
-    for (let i = 0; i < lastUser; i++) {
-      if (!isRecord(messages[i])) continue;
-      const m = messages[i] as Record<string, unknown>;
-      if (m.role !== "user") continue;
-      if (redactSet.has(fps[i])) continue;
-      redactSet.add(fps[i]);
-      if (hasRedactableText(m.content)) {
-        redactMessageAt(messages, i);
-        anyRedacted = true;
-      }
-    }
-    // Stage 2: If all older user messages are already redacted, escalate to older assistant messages
-    if (!anyRedacted) {
+    const sensitive = isSensitiveBlock;
+    isSensitiveBlock = false;
+
+    if (sensitive) {
+      // Sensitive words detected: neutralize ALL older turns (user, tool, assistant) in one shot
       for (let i = 0; i < lastUser; i++) {
         if (!isRecord(messages[i])) continue;
         const m = messages[i] as Record<string, unknown>;
-        if (m.role !== "assistant") continue;
+        if (!isHideable(m)) continue;
+        redactSet.add(fps[i]);
+        if (hasRedactableText(m.content, m)) {
+          redactMessageAt(messages, i);
+        }
+      }
+    } else {
+      // Language ratio block: Stage 1 user, Stage 2 assistant & tool
+      let anyRedacted = false;
+      for (let i = 0; i < lastUser; i++) {
+        if (!isRecord(messages[i])) continue;
+        const m = messages[i] as Record<string, unknown>;
+        if (m.role !== "user") continue;
         if (redactSet.has(fps[i])) continue;
         redactSet.add(fps[i]);
-        if (hasRedactableText(m.content)) {
+        if (hasRedactableText(m.content, m)) {
           redactMessageAt(messages, i);
           anyRedacted = true;
+        }
+      }
+      if (!anyRedacted) {
+        for (let i = 0; i < lastUser; i++) {
+          if (!isRecord(messages[i])) continue;
+          const m = messages[i] as Record<string, unknown>;
+          if (m.role !== "assistant" && m.role !== "tool") continue;
+          if (redactSet.has(fps[i])) continue;
+          redactSet.add(fps[i]);
+          if (hasRedactableText(m.content, m)) {
+            redactMessageAt(messages, i);
+            anyRedacted = true;
+          }
         }
       }
     }
@@ -477,6 +529,19 @@ export default function (pi: ExtensionAPI) {
     ],
   });
 
+  // Prune broken error messages from context so failed turns don't pollute future turns
+  pi.on("context", (event, ctx) => {
+    const provider = ctx.model?.provider;
+    if (provider && !provider.toLowerCase().includes("agentrouter")) return;
+    const filtered = event.messages.filter((m) => {
+      if (m.role === "assistant" && m.stopReason === "error") return false;
+      return true;
+    });
+    if (filtered.length !== event.messages.length) {
+      return { messages: filtered };
+    }
+  });
+
   // Mutate payload.messages copies (return undefined). Cloning the whole payload
   // drops provider fields; copying only message objects keeps session state clean.
   pi.on("before_provider_request", (event, ctx) => {
@@ -495,7 +560,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_end", (event, ctx) => {
     const message = event.message;
-    if (message.role === "assistant" && message.stopReason !== "error") wafNotified = false;
+    if (message.role === "assistant" && message.stopReason !== "error") {
+      wafNotified = false;
+      isSensitiveBlock = false;
+    }
     if (message.role !== "assistant" || message.stopReason !== "error") return;
     const provider = message.provider ?? ctx.model?.provider;
     if (!provider?.toLowerCase().includes("agentrouter")) return;
@@ -503,6 +571,9 @@ export default function (pi: ExtensionAPI) {
     const errorMessage = message.errorMessage ?? "";
     if (!WAF_BLOCK_RE.test(errorMessage)) return;
     escalatePending = true;
+    if (SENSITIVE_WORDS_RE.test(errorMessage)) {
+      isSensitiveBlock = true;
+    }
     if (exhausted) {
       if (!wafNotified) {
         wafNotified = true;
@@ -516,12 +587,10 @@ export default function (pi: ExtensionAPI) {
     }
     if (!wafNotified) {
       wafNotified = true;
-      ctx.ui.notify(
-        `AgentRouter content filter blocked the request. ` +
-          `Retrying automatically with earlier messages hidden. ` +
-          `Your latest message is kept.`,
-        "warning",
-      );
+      const note = isSensitiveBlock
+        ? "Sensitive words detected in agent activity. Neutralizing previous leftovers so subsequent chats can proceed safely."
+        : "AgentRouter content filter blocked the request. Retrying automatically with earlier messages hidden.";
+      ctx.ui.notify(note, "warning");
     }
     // Mark the error as retryable so pi auto-restarts the turn: pi's retry
     // classifier (pi-ai isRetryableAssistantError) matches "provider returned
