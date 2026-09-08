@@ -104,7 +104,8 @@ function copyMessage(msg: Record<string, unknown>): Record<string, unknown> {
   return copy;
 }
 function fingerprintOf(msg: Record<string, unknown>): string {
-  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}`;
+  const tc = Array.isArray(msg.tool_calls) ? JSON.stringify(msg.tool_calls).slice(0, 80) : "";
+  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}:${tc}`;
 }
 function firstUserAnchor(messages: unknown[]): string {
   for (const m of messages) {
@@ -112,18 +113,26 @@ function firstUserAnchor(messages: unknown[]): string {
   }
   return String(messages.length);
 }
-function hasRedactableText(content: unknown): boolean {
-  if (typeof content === "string") return content.length > 0;
-  if (!Array.isArray(content)) return false;
-  for (const b of content) {
-    if (!isRecordV(b)) continue;
-    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) return true;
-    if (b.type === "tool_result") {
-      if (typeof b.content === "string" && b.content.length > 0) return true;
-      if (Array.isArray(b.content)) {
-        for (const c of b.content) {
-          if (isRecordV(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0) return true;
+function hasRedactableText(content: unknown, msg?: Record<string, unknown>): boolean {
+  if (typeof content === "string") return content.length > 0 && content !== REDACTED_NOTE;
+  if (Array.isArray(content)) {
+    for (const b of content) {
+      if (!isRecordV(b)) continue;
+      if (b.type === "text" && typeof b.text === "string" && b.text.length > 0 && b.text !== REDACTED_NOTE) return true;
+      if (b.type === "tool_result") {
+        if (typeof b.content === "string" && b.content.length > 0 && b.content !== REDACTED_NOTE) return true;
+        if (Array.isArray(b.content)) {
+          for (const c of b.content) {
+            if (isRecordV(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0 && c.text !== REDACTED_NOTE) return true;
+          }
         }
+      }
+    }
+  }
+  if (msg && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+    for (const tc of msg.tool_calls) {
+      if (isRecordV(tc) && isRecordV(tc.function) && typeof tc.function.arguments === "string" && tc.function.arguments !== "{}") {
+        return true;
       }
     }
   }
@@ -151,15 +160,49 @@ function lastUserIndex(messages: unknown[]): number {
   return -1;
 }
 function isHideable(msg: Record<string, unknown>): boolean {
-  return msg.role === "user" || msg.role === "assistant";
+  return msg.role === "user" || msg.role === "assistant" || msg.role === "tool";
+}
+
+function redactMessageAt(messages: unknown[], i: number): void {
+  const msg = messages[i];
+  if (!isRecordV(msg)) return;
+  if (typeof msg.content === "string") {
+    msg.content = REDACTED_NOTE;
+  } else if (Array.isArray(msg.content)) {
+    redactBlocks(msg.content);
+  } else if (msg.role === "tool" || msg.role === "assistant") {
+    msg.content = REDACTED_NOTE;
+  }
+  if (Array.isArray(msg.tool_calls)) {
+    for (const tc of msg.tool_calls) {
+      if (isRecordV(tc) && isRecordV(tc.function) && typeof tc.function.arguments === "string") {
+        tc.function.arguments = "{}";
+      }
+    }
+  }
 }
 
 const redactSet = new Set<string>();
 let escalatePending = false;
+let isSensitiveBlock = false;
 let sessionAnchor: string | null = null;
 
 function apply(payload: { messages: unknown[] }): void {
-  const messages = payload.messages;
+  let messages = payload.messages;
+
+  // Prune failed assistant messages in-place so dead error turns do not linger
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!isRecordV(m)) continue;
+    if (m.role === "assistant") {
+      if ((m as Record<string, unknown>).stopReason === "error") {
+        messages.splice(i, 1);
+      } else if (typeof m.content === "string" && /sensitive[_ ]words?[_ ]detected|content-blocked/i.test(m.content)) {
+        messages.splice(i, 1);
+      }
+    }
+  }
+
   const fps = messages.map((m) => (isRecordV(m) ? fingerprintOf(m) : ""));
   const anchor = firstUserAnchor(messages);
   if (anchor !== sessionAnchor) {
@@ -168,6 +211,7 @@ function apply(payload: { messages: unknown[] }): void {
     if (!firstContact) {
       redactSet.clear();
       escalatePending = false;
+      isSensitiveBlock = false;
     }
   }
   const lastUser = lastUserIndex(messages);
@@ -175,43 +219,54 @@ function apply(payload: { messages: unknown[] }): void {
     if (!isRecordV(messages[i]) || !isHideable(messages[i] as Record<string, unknown>)) continue;
     if (redactSet.has(fps[i])) {
       messages[i] = copyMessage(messages[i] as Record<string, unknown>);
-      const copy = messages[i] as Record<string, unknown>;
-      if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
-      else redactBlocks(copy.content);
+      redactMessageAt(messages, i);
     }
   }
   if (escalatePending) {
     escalatePending = false;
-    // Step 1: Redact ALL older user messages in one shot to neutralize cumulative WAF triggers
-    let anyRedacted = false;
-    for (let i = 0; i < lastUser; i++) {
-      if (!isRecordV(messages[i])) continue;
-      const m = messages[i] as Record<string, unknown>;
-      if (m.role !== "user") continue;
-      if (redactSet.has(fps[i])) continue;
-      redactSet.add(fps[i]);
-      if (hasRedactableText(m.content)) {
-        messages[i] = copyMessage(m);
-        const copy = messages[i] as Record<string, unknown>;
-        if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
-        else redactBlocks(copy.content);
-        anyRedacted = true;
-      }
-    }
-    // Step 2: If all older user messages are already redacted, escalate to assistant messages
-    if (!anyRedacted) {
+    const sensitive = isSensitiveBlock;
+    isSensitiveBlock = false;
+
+    if (sensitive) {
+      // Sensitive words detected: neutralize ALL older turns (user, tool, assistant) in one shot
       for (let i = 0; i < lastUser; i++) {
         if (!isRecordV(messages[i])) continue;
         const m = messages[i] as Record<string, unknown>;
-        if (m.role !== "assistant") continue;
+        if (!isHideable(m)) continue;
+        redactSet.add(fps[i]);
+        if (hasRedactableText(m.content, m)) {
+          messages[i] = copyMessage(m);
+          redactMessageAt(messages, i);
+        }
+      }
+    } else {
+      // Step 1: Redact ALL older user messages in one shot to neutralize cumulative WAF triggers
+      let anyRedacted = false;
+      for (let i = 0; i < lastUser; i++) {
+        if (!isRecordV(messages[i])) continue;
+        const m = messages[i] as Record<string, unknown>;
+        if (m.role !== "user") continue;
         if (redactSet.has(fps[i])) continue;
         redactSet.add(fps[i]);
-        if (hasRedactableText(m.content)) {
+        if (hasRedactableText(m.content, m)) {
           messages[i] = copyMessage(m);
-          const copy = messages[i] as Record<string, unknown>;
-          if (typeof copy.content === "string") copy.content = REDACTED_NOTE;
-          else redactBlocks(copy.content);
+          redactMessageAt(messages, i);
           anyRedacted = true;
+        }
+      }
+      // Step 2: If all older user messages are already redacted, escalate to assistant & tool messages
+      if (!anyRedacted) {
+        for (let i = 0; i < lastUser; i++) {
+          if (!isRecordV(messages[i])) continue;
+          const m = messages[i] as Record<string, unknown>;
+          if (m.role !== "assistant" && m.role !== "tool") continue;
+          if (redactSet.has(fps[i])) continue;
+          redactSet.add(fps[i]);
+          if (hasRedactableText(m.content, m)) {
+            messages[i] = copyMessage(m);
+            redactMessageAt(messages, i);
+            anyRedacted = true;
+          }
         }
       }
     }
@@ -269,6 +324,51 @@ const fresh = [
 ];
 apply({ messages: fresh });
 if (fresh[1].content !== "sesi baru") throw new Error("/new still redacted the new first user turn");
+
+// --- OpenAI format & sensitive_words_detected test ---
+// When agent runs a todo, emits tool call, receives tool result, and an error occurs:
+const openaiHist = [
+  { role: "system", content: "You are an expert coding assistant operating inside pi." },
+  { role: "user", content: "Jalankan todo" },
+  {
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      { id: "call_todo_1", type: "function", function: { name: "todo", arguments: '{"action":"update"}' } },
+    ],
+  },
+  { role: "tool", tool_call_id: "call_todo_1", content: "sensitive word in todo result" },
+  { role: "assistant", content: "error: sensitive words detected", stopReason: "error" },
+  { role: "user", content: "Continue" },
+];
+
+// Simulate established session anchor for openaiHist
+apply({ messages: openaiHist.slice(0, 2) });
+escalatePending = true;
+isSensitiveBlock = true;
+apply({ messages: openaiHist });
+
+// Error assistant message must be pruned completely
+if (openaiHist.some((m) => (m as { role: string; stopReason?: string }).stopReason === "error")) {
+  throw new Error("error assistant message was not pruned");
+}
+// Newest user turn "Continue" is preserved
+const lastTurn = openaiHist[openaiHist.length - 1] as { role: string; content: string };
+if (lastTurn.role !== "user" || lastTurn.content !== "Continue") {
+  throw new Error(`newest user turn "Continue" was corrupted: ${JSON.stringify(lastTurn)}`);
+}
+// Tool message was redacted
+const toolMsg = openaiHist.find((m) => (m as { role: string }).role === "tool") as { content: string };
+if (!toolMsg || toolMsg.content !== REDACTED_NOTE) {
+  throw new Error("tool message was not redacted");
+}
+// Assistant tool_calls arguments were sanitized
+const asstMsg = openaiHist.find((m) => (m as { role: string }).role === "assistant") as {
+  tool_calls: { function: { arguments: string } }[];
+};
+if (asstMsg.tool_calls[0].function.arguments !== "{}") {
+  throw new Error("assistant tool_calls arguments were not sanitized");
+}
 
 // 1.2.2 auto-retry: the retryable suffix must match pi-ai's RETRYABLE_PROVIDER_ERROR_PATTERN
 // ("provider.?returned.?error") so pi restarts the turn after a WAF block.
