@@ -1,88 +1,75 @@
-# ⚡ @bismawy/pi-agentrouter
+<div align="center">
 
-**Unified [AgentRouter](https://agentrouter.org) provider for [pi coding agent](https://github.com/earendil-works/pi-coding-agent).**
+# pi-agentrouter
 
-Routes GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` provider namespace with built-in WAF auto-recovery, dual OpenAI/Anthropic protocol handling, and payload sanitization.
+Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with WAF auto-recovery and payload sanitization.
 
-[![pi extension](https://img.shields.io/badge/pi-extension-blueviolet)](https://github.com/earendil-works/pi-coding-agent)
-[![npm](https://img.shields.io/npm/v/@bismawy/pi-agentrouter)](https://www.npmjs.com/package/@bismawy/pi-agentrouter)
-[![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+[pi package](https://pi.dev/packages/@bismawy/pi-agentrouter) · [npm](https://www.npmjs.com/package/@bismawy/pi-agentrouter) · [Issues](https://github.com/bismawy/pi-agentrouter/issues)
 
-![pi-agentrouter](https://raw.githubusercontent.com/bismawy/pi-agentrouter/main/assets/screenshot.webp)
+![npm](https://img.shields.io/npm/v/@bismawy/pi-agentrouter)
+![license](https://img.shields.io/badge/license-MIT-green)
 
----
+</div>
 
-## ⚡ Quick Start
+<img src="assets/screenshot.webp" alt="pi-agentrouter" width="100%">
 
-### 1. Installation
+## What it does
+
+- **Dual protocol routing:** Claude models go through Anthropic Messages, the rest through OpenAI Completions — all under one `agentrouter/` provider.
+- **WAF header & language guard:** forces Pi's canonical system header to byte 0 (prevents `400 content-blocked` when custom instructions precede it) and applies language framing on user turns.
+- **Self-healing WAF redaction:** when AgentRouter's content filter false-positives on multilingual histories, older turns are redacted in two stages and the turn is marked retryable — the latest request is preserved without user disruption.
+- **Payload sanitization:** strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
+- **Prompt cache affinity:** injects `sendSessionAffinityHeaders: true` by default to maximize server-side cache hits.
+
+## Registered models
+
+| Model | Context | Input | Protocol | Thinking |
+| :--- | :--- | :--- | :--- | :--- |
+| `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
+| `agentrouter/claude-opus-5` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
+| `agentrouter/claude-opus-4-8` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
+| `agentrouter/deepseek-v4-flash` | 131k | text | OpenAI Completions | `low` – `xhigh` |
+| `agentrouter/glm-5.3` | 131k | text | OpenAI Completions | `low` – `xhigh` |
+
+## Install
+
 ```bash
 pi install npm:@bismawy/pi-agentrouter
 ```
-*(Or install directly from Git: `pi install git:github.com/bismawy/pi-agentrouter`)*
 
-### 2. Supply API Key
-Provide your AgentRouter API key through any of the following methods:
-- In Pi interactive session: `/login agentrouter`
-- Environment variable: `export AGENTROUTER_API_KEY="your-api-key"`
-- In `~/.pi/agent/models.json` under `providers.agentrouter.apiKey`
+Then supply your AgentRouter API key one of three ways:
 
-> 🎁 **Need an account?** Register via [AgentRouter Sign Up (Referral)](https://agentrouter.org/register?aff=CKdn) to get a **$50.00 bonus reward** (transferable to your account balance).
+- `/login agentrouter` in a Pi session
+- `export AGENTROUTER_API_KEY="your-api-key"`
+- `providers.agentrouter.apiKey` in `~/.pi/agent/models.json`
 
-### 3. Switch Model
-Run `/model` and pick any `agentrouter/<model-id>` (e.g. `agentrouter/gpt-5.6-sol`).
+> No account yet? [Register via AgentRouter (referral)](https://agentrouter.org/register?aff=CKdn) for a $50 bonus.
 
----
+Pick any model with `/model` (e.g. `agentrouter/gpt-5.6-sol`).
 
-## 🤖 Registered Models (`agentrouter/`)
-
-| Model | Context | Input | API Protocol | Thinking / Reasoning |
-|---|---|---|---|---|
-| `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions (`/v1`) | `low`, `medium`, `high`, `xhigh` |
-| `agentrouter/claude-opus-5` | 200k | text, image | Anthropic Messages | `low`, `medium`, `high`, `xhigh` |
-| `agentrouter/claude-opus-4-8` | 200k | text, image | Anthropic Messages | `low`, `medium`, `high`, `xhigh` |
-| `agentrouter/deepseek-v4-flash` | 131k | text | OpenAI Completions (`/v1`) | `low`, `medium`, `high`, `xhigh` |
-| `agentrouter/glm-5.3` | 131k | text | OpenAI Completions (`/v1`) | `low`, `medium`, `high`, `xhigh` |
-
----
-
-## 🚀 Key Capabilities
-
-- 🎯 **Unified Namespace with Dual Protocol Routing:** Automatically routes Claude models via per-model Anthropic Messages protocol while OpenAI, DeepSeek, and GLM models use OpenAI Completions under `agentrouter/`.
-- 🛡️ **WAF Header & Language Guard:** Guarantees Pi's canonical system header sits at byte 0 (preventing `400 content-blocked` when custom instructions/`AGENTS.md` precede it) and applies language framing on user turns.
-- 🔄 **Self-Healing WAF Redaction (1.3.x):** If AgentRouter's content filter triggers on non-English token ratios across chat histories, turns are marked retryable with two-stage escalation (all older user turns in Stage 1, followed by assistant turns if needed), preserving the latest request without user disruption.
-- 🧹 **Robust Payload Sanitization:** Filters out ANSI escape codes, null bytes, non-printable control characters, and orphan Unicode surrogates before dispatching requests.
-- ⚡ **Prompt Cache Affinity:** Injects `sendSessionAffinityHeaders: true` by default to maximize server-side prompt cache hits.
-
----
-
-## 📖 Deep Dive & Technical Architecture
+## How it works
 
 <details>
-<summary><b>🛡️ WAF Auto-Recovery & History Redaction Details</b></summary>
+<summary><b>WAF auto-recovery lifecycle</b></summary>
 
-### The Problem
-AgentRouter WAF inspects request payload framing and token distributions. Long multilingual sessions (e.g., Bahasa Indonesia / non-English conversations with large code pastes) can trigger false-positive `400 content-blocked` errors.
-
-### The Self-Healing Lifecycle
-1. **Byte-0 Canonical Header:** The extension forces Pi's system prompt header to the very start of the payload.
-2. **Dynamic Escalation:** Upon encountering `/sensitive[_ ]words?[_ ]detected|content-blocked/i`, the extension marks the error as retryable for Pi to restart the turn automatically.
-3. **Two-Stage Redaction:** It replaces older user turn text blocks with `[Message withheld by local policy]` in Stage 1 (and assistant turns in Stage 2 if needed) while keeping tool execution pairs intact.
-4. **Anchor Reset:** New conversations or compaction cycles reset the redaction depth automatically.
+1. The extension forces Pi's system prompt header to the very start of the payload.
+2. On a `content-blocked` / sensitive-words error, it marks the error retryable so Pi restarts the turn automatically.
+3. Stage 1 redacts older user turns (`[Message withheld by local policy]`); Stage 2 escalates to assistant turns if needed, keeping tool pairs intact.
+4. Redaction depth resets on new conversations or compaction.
 
 </details>
 
 <details>
-<summary><b>⚙️ Accurate Model Capability Boundaries</b></summary>
+<summary><b>Capability boundaries</b></summary>
 
-- Models like `deepseek-v4-flash` and `glm-5.3` are explicitly declared as `input: ["text"]`.
-- This prevents downstream `type 参数非法` 400 errors from AgentRouter when a previous conversation turn contains image payloads from other models.
+Text-only models (`deepseek-v4-flash`, `glm-5.3`) are declared `input: ["text"]` so image payloads from earlier turns don't produce AgentRouter 400 errors.
 
 </details>
 
----
+## License
 
-## 📜 License & Acknowledgments
+Distributed under the **MIT** license.
 
-- Designed for the **[pi coding agent](https://github.com/earendil-works/pi-coding-agent)**.
-- Header injection pattern aligned with `@madgagarin/pi-agentrouter`.
-- Distributed under the **[MIT License](./LICENSE)**.
+## Developer
+
+Developed and maintained by [Bisma](https://github.com/bismawy).
