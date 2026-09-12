@@ -40,10 +40,16 @@ assert.equal(astra.thinkingLevelMap.xhigh, "xhigh");
 assert.deepEqual(astra.input, ["text", "image"]);
 assert.equal(provider.api, "openai-completions");
 assert.equal(provider.models.length, 6);
-// pi ignores provider-level compat for extension providers — it must live on each model.
+// pi ignores provider-level compat for extension providers — it must live on each model,
+// and the provider must stay self-sufficient without pi-auto-compat's modelOverrides.
 assert.equal(provider.compat, undefined);
 for (const m of provider.models) {
   assert.equal(m.compat?.sendSessionAffinityHeaders, true, `${m.id}: session affinity must be per-model`);
+  assert.equal(m.compat?.supportsLongCacheRetention, true, `${m.id}: long cache retention must be declared`);
+}
+for (const id of ["claude-opus-4-8", "claude-opus-5"]) {
+  const claude = provider.models.find((m: Wire) => m.id === id);
+  assert.equal(claude.compat?.forceAdaptiveThinking, true, `${id}: adaptive thinking must be declared on proxy models`);
 }
 assert.equal(provider.models.find((m: Wire) => m.id === "claude-opus-5").api, "anthropic-messages");
 const foreign = { model: "gpt-6-astra", input: [{ role: "user", content: "hello" }] };
