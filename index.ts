@@ -14,6 +14,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerAgentRouterCommands } from "./agentrouter-commands.ts";
 
 /**
  * Strips ANSI escapes, non-printable control characters, null bytes,
@@ -568,6 +569,8 @@ export default function (pi: ExtensionAPI) {
       },
     ],
   });
+
+  registerAgentRouterCommands(pi);
 
   // Prune broken error messages from context so failed turns don't pollute future turns
   pi.on("context", (event, ctx) => {

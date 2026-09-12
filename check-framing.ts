@@ -2,20 +2,48 @@
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import register from "./index.ts";
+import { AGENTROUTER_PROBE_TARGETS } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
 type Wire = Record<string, any>;
 const hooks = new Map<string, (event: Wire, ctx: Wire) => any>();
+const commands = new Map<string, Wire>();
 let provider: Wire = {};
 register({
   registerProvider(name: string, config: Wire) {
     assert.equal(name, "agentrouter");
     provider = config;
   },
+  registerCommand(name: string, options: Wire) {
+    assert.ok(!commands.has(name), `duplicate command ${name}`);
+    commands.set(name, options);
+  },
   on(name: string, handler: (event: Wire, ctx: Wire) => any) {
     hooks.set(name, handler);
   },
 } as unknown as ExtensionAPI);
+
+// PROBE_TARGETS_DRIFT_CHECK: commands and probe targets must stay in step with the
+// registered provider - drift would make /agentrouter-status probe an endpoint the
+// model never uses, or advertise a command that does not exist.
+assert.deepEqual([...commands.keys()].sort(), ["agentrouter-status", "agentrouter-usage"]);
+for (const [name, options] of commands) {
+  assert.equal(typeof options.handler, "function", `${name} needs a handler`);
+  assert.ok(options.description, `${name} needs a description`);
+}
+const registered = new Map<string, { api: string; baseUrl: string }>(
+  (provider.models as Wire[]).map((m) => [
+    m.id as string,
+    { api: (m.api ?? provider.api) as string, baseUrl: (m.baseUrl ?? provider.baseUrl) as string },
+  ]),
+);
+assert.equal(AGENTROUTER_PROBE_TARGETS.length, registered.size, "probe target count drift");
+for (const target of AGENTROUTER_PROBE_TARGETS) {
+  const actual = registered.get(target.id);
+  assert.ok(actual, `probe target ${target.id} is not a registered model`);
+  assert.equal(actual.api, target.api, `${target.id}: api drift`);
+  assert.equal(actual.baseUrl, target.baseUrl, `${target.id}: baseUrl drift`);
+}
 const ctx = { model: { provider: "agentrouter" }, ui: { notify() {} } };
 function request(payload: Wire): Wire {
   assert.equal(hooks.get("before_provider_request")!({ payload }, ctx), undefined);
