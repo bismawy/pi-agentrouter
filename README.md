@@ -2,7 +2,7 @@
 
 # pi-agentrouter
 
-Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with WAF auto-recovery and payload sanitization.
+Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with WAF auto-recovery and payload sanitization.
 
 [pi package](https://pi.dev/packages/@bismawy/pi-agentrouter) · [npm](https://www.npmjs.com/package/@bismawy/pi-agentrouter) · [Issues](https://github.com/bismawy/pi-agentrouter/issues)
 
@@ -15,7 +15,7 @@ Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent
 
 ## What it does
 
-- **Dual protocol routing:** Claude models go through Anthropic Messages, the rest through OpenAI Completions — all under one `agentrouter/` provider.
+- **Per-model protocol routing:** GPT-6 Astra uses OpenAI Responses, Claude models use Anthropic Messages, and the rest use OpenAI Completions — all under one `agentrouter/` provider.
 - **WAF header & language guard:** forces Pi's canonical system header to byte 0 (prevents `400 content-blocked` when custom instructions precede it) and applies language framing on user turns.
 - **Self-healing WAF redaction:** when AgentRouter's content filter false-positives on multilingual histories, older turns are redacted in two stages and the turn is marked retryable — the latest request is preserved without user disruption.
 - **Payload sanitization:** strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
@@ -25,11 +25,14 @@ Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent
 
 | Model | Context | Input | Protocol | Thinking |
 | :--- | :--- | :--- | :--- | :--- |
+| `agentrouter/gpt-6-astra` | 272k* | text, image | OpenAI Responses | `low` – `xhigh` |
 | `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
 | `agentrouter/claude-opus-5` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
 | `agentrouter/claude-opus-4-8` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
 | `agentrouter/deepseek-v4-flash` | 131k | text | OpenAI Completions | `low` – `xhigh` |
 | `agentrouter/glm-5.3` | 131k | text | OpenAI Completions | `low` – `xhigh` |
+
+*Astra currently reuses Sol's configured 272,000-token context and 16,384-token output limits; these are local defaults, not confirmed AgentRouter limits. Responses API is required for function tools with reasoning enabled. Existing models keep their original protocols.
 
 ## Install
 
@@ -65,6 +68,18 @@ Pick any model with `/model` (e.g. `agentrouter/gpt-5.6-sol`).
 Text-only models (`deepseek-v4-flash`, `glm-5.3`) are declared `input: ["text"]` so image payloads from earlier turns don't produce AgentRouter 400 errors.
 
 </details>
+
+## Development
+
+Run the regression check against the actual registered extension hooks (no API key or network required):
+
+```bash
+bun ./check-framing.ts
+# Or Node.js 22.18+:
+npm test
+```
+
+Covers Responses text/image framing, empty content, function-call/result pairing, reasoning items, sticky WAF redaction, and Chat Completions/Anthropic compatibility.
 
 ## License
 
