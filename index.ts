@@ -404,10 +404,17 @@ function patchAgentRouterPayload(payload: unknown): void {
  * pi reads `compat` from the MODEL entry only — provider-level compat is ignored
  * for extension-registered providers (it is merged only for models.json).
  * Single source of truth, spread into every model below.
+ *
+ * Declared in full so this provider works without pi-auto-compat:
+ * - sendSessionAffinityHeaders defaults to false — on openai-completions it is the
+ *   only reason prompt-cache affinity headers get sent at all.
+ * - supportsLongCacheRetention is detection-based on openai-completions; pinning it
+ *   matches what pi-auto-compat would otherwise inject via modelOverrides.
  */
 const AGENTROUTER_COMPAT = {
   supportsDeveloperRole: false,
   sendSessionAffinityHeaders: true,
+  supportsLongCacheRetention: true,
 } as const;
 
 export default function (pi: ExtensionAPI) {
@@ -521,7 +528,13 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: { ...AGENTROUTER_COMPAT, cacheControlFormat: "anthropic" },
+        compat: {
+          ...AGENTROUTER_COMPAT,
+          cacheControlFormat: "anthropic",
+          // pi ships adaptive thinking in the metadata of real Claude models; on a
+          // proxy model it must be declared or pi falls back to budget thinking.
+          forceAdaptiveThinking: true,
+        },
       },
       {
         id: "claude-opus-5",
@@ -547,7 +560,11 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: { ...AGENTROUTER_COMPAT, cacheControlFormat: "anthropic" },
+        compat: {
+          ...AGENTROUTER_COMPAT,
+          cacheControlFormat: "anthropic",
+          forceAdaptiveThinking: true,
+        },
       },
     ],
   });
