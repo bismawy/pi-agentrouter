@@ -2,14 +2,14 @@
  * AgentRouter Provider Extension for pi
  *
  * Registers AgentRouter (https://agentrouter.org) as a single custom provider
- * with GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3.
- * Claude models use per-model api/baseUrl/header overrides (anthropic-messages);
+ * with GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3.
+ * GPT-6 Astra uses openai-responses; Claude models use anthropic-messages;
  * the rest ride the provider-level openai-completions config.
  *
  * Setup:
  *   1. /login agentrouter  (or set AGENTROUTER_API_KEY)
  *   2. Install: pi install npm:@bismawy/pi-agentrouter
- *   3. /model → agentrouter/gpt-5.6-sol, agentrouter/claude-opus-4-8,
+ *   3. /model → agentrouter/gpt-6-astra, agentrouter/gpt-5.6-sol, agentrouter/claude-opus-4-8,
  *      agentrouter/claude-opus-5, agentrouter/deepseek-v4-flash, agentrouter/glm-5.3
  */
 
@@ -66,7 +66,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function enforceCanonicalRootPrompt(systemPrompt: unknown): unknown {
+function enforceCanonicalRootPrompt(systemPrompt: unknown, textType = "text"): unknown {
   if (!systemPrompt) return CANONICAL_PI_HEADER;
 
   if (typeof systemPrompt === "string") {
@@ -85,7 +85,7 @@ function enforceCanonicalRootPrompt(systemPrompt: unknown): unknown {
   }
 
   if (Array.isArray(systemPrompt)) {
-    if (systemPrompt.length === 0) return [{ type: "text", text: CANONICAL_PI_HEADER }];
+    if (systemPrompt.length === 0) return [{ type: textType, text: CANONICAL_PI_HEADER }];
     const first = systemPrompt[0];
     if (isRecord(first) && typeof first.text === "string") {
       first.text = enforceCanonicalRootPrompt(first.text) as string;
@@ -96,55 +96,39 @@ function enforceCanonicalRootPrompt(systemPrompt: unknown): unknown {
   return systemPrompt;
 }
 
-function prependUserPreamble(content: unknown): unknown {
+function prependUserPreamble(content: unknown, textType = "text"): unknown {
   if (typeof content === "string") {
     if (content.startsWith(LANGUAGE_PREAMBLE)) return content;
     return content ? `${LANGUAGE_PREAMBLE}\n\n${content}` : LANGUAGE_PREAMBLE;
   }
   if (!Array.isArray(content)) return content;
-  if (content.length === 0) return [{ type: "text", text: LANGUAGE_PREAMBLE }];
+  if (content.length === 0) return [{ type: textType, text: LANGUAGE_PREAMBLE }];
   const head = content[0];
-  if (isRecord(head) && head.type === "text" && typeof head.text === "string") {
+  if (isRecord(head) && head.type === textType && typeof head.text === "string") {
     if (head.text.startsWith(LANGUAGE_PREAMBLE)) return content;
     head.text = `${LANGUAGE_PREAMBLE}\n\n${head.text}`;
     return content;
   }
-  return [{ type: "text", text: LANGUAGE_PREAMBLE }, ...content];
-}
-
-/** Shallow-copy a message so in-place edits never touch pi session objects. */
-function copyMessage(msg: Record<string, unknown>): Record<string, unknown> {
-  const copy = { ...msg };
-  if (Array.isArray(msg.content)) {
-    copy.content = msg.content.map((b) => {
-      if (!isRecord(b)) return b;
-      const bc = { ...b };
-      if (Array.isArray(b.content)) {
-        bc.content = b.content.map((c) => (isRecord(c) ? { ...c } : c));
-      }
-      return bc;
-    });
-  }
-  return copy;
+  return [{ type: textType, text: LANGUAGE_PREAMBLE }, ...content];
 }
 
 function isAgentRouterCall(payload: unknown, provider?: string, baseUrl?: string): boolean {
-  if (provider?.toLowerCase().includes("agentrouter")) return true;
-  if (baseUrl?.toLowerCase().includes("agentrouter.org")) return true;
+  if (provider) return provider.toLowerCase().includes("agentrouter");
+  if (baseUrl) return baseUrl.toLowerCase().includes("agentrouter.org");
   if (!isRecord(payload) || typeof payload.model !== "string") return false;
-  return /gpt-5\.|glm-5\.|deepseek-v|claude-opus/.test(payload.model);
+  return /gpt-5\.|gpt-6-astra|glm-5\.|deepseek-v|claude-opus/.test(payload.model);
 }
 
 /**
  * Prepend the language preamble to a user turn, unless the content starts
  * with a tool_result block (Anthropic requires those to lead the message).
  */
-function frameUserTurn(msg: Record<string, unknown>): void {
+function frameUserTurn(msg: Record<string, unknown>, textType = "text"): void {
   if (Array.isArray(msg.content)) {
     const head = msg.content[0];
     if (isRecord(head) && head.type === "tool_result") return;
   }
-  msg.content = prependUserPreamble(msg.content);
+  msg.content = prependUserPreamble(msg.content, textType);
 }
 
 // --- Poisoned-history auto-recovery (1.3.0) --------------------------------
@@ -158,8 +142,8 @@ function frameUserTurn(msg: Record<string, unknown>): void {
 // Fingerprints stay sticky across subsequent turns in the same session.
 const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
 const SENSITIVE_WORDS_RE = /sensitive[_ ]words?[_ ]detected/i;
-// ponytail: placeholder must stay WAF-neutral — earlier text mentioning the
-// filter's own vocabulary ("sensitive words", "blocked") re-triggered the WAF.
+// Keep the placeholder WAF-neutral; wording about the filter previously
+// triggered additional content-filter rejections.
 const REDACTED_NOTE = "[Message withheld by local policy]";
 const MAX_REDACTED = 1000;
 
@@ -172,7 +156,11 @@ let wafNotified = false;
 
 function fingerprintOf(msg: Record<string, unknown>): string {
   const tc = Array.isArray(msg.tool_calls) ? JSON.stringify(msg.tool_calls).slice(0, 80) : "";
-  return `${msg.role}:${JSON.stringify(msg.content).slice(0, 160)}:${tc}`;
+  // Responses function/reasoning/reference items have no content or role.
+  if (msg.type === "function_call" || msg.type === "function_call_output") {
+    return `${msg.type}:${msg.call_id}:${JSON.stringify(msg.arguments ?? msg.output ?? "").slice(0, 160)}`;
+  }
+  return `${msg.role ?? msg.type}:${JSON.stringify(msg.content ?? "").slice(0, 160)}:${tc}`;
 }
 
 // First USER message, skipping system/developer — those are constant so they
@@ -184,17 +172,23 @@ function firstUserAnchor(messages: unknown[]): string {
   return String(messages.length);
 }
 
+function isTextBlock(block: Record<string, unknown>): boolean {
+  return block.type === "text" || block.type === "input_text" || block.type === "output_text";
+}
+
 function hasRedactableText(content: unknown, msg?: Record<string, unknown>): boolean {
+  if (msg?.type === "function_call") return typeof msg.arguments === "string" && msg.arguments !== "{}";
+  if (msg?.type === "function_call_output") return hasRedactableText(msg.output);
   if (typeof content === "string") return content.length > 0 && content !== REDACTED_NOTE;
   if (Array.isArray(content)) {
     for (const b of content) {
       if (!isRecord(b)) continue;
-      if (b.type === "text" && typeof b.text === "string" && b.text.length > 0 && b.text !== REDACTED_NOTE) return true;
+      if (isTextBlock(b) && typeof b.text === "string" && b.text.length > 0 && b.text !== REDACTED_NOTE) return true;
       if (b.type === "tool_result") {
         if (typeof b.content === "string" && b.content.length > 0 && b.content !== REDACTED_NOTE) return true;
         if (Array.isArray(b.content)) {
           for (const c of b.content) {
-            if (isRecord(c) && c.type === "text" && typeof c.text === "string" && c.text.length > 0 && c.text !== REDACTED_NOTE) {
+            if (isRecord(c) && isTextBlock(c) && typeof c.text === "string" && c.text.length > 0 && c.text !== REDACTED_NOTE) {
               return true;
             }
           }
@@ -216,13 +210,13 @@ function redactBlocks(content: unknown): void {
   if (!Array.isArray(content)) return;
   for (const block of content) {
     if (!isRecord(block)) continue;
-    if (block.type === "text" && typeof block.text === "string") {
+    if (isTextBlock(block) && typeof block.text === "string") {
       block.text = REDACTED_NOTE;
     } else if (block.type === "tool_result") {
       if (typeof block.content === "string") block.content = REDACTED_NOTE;
       else if (Array.isArray(block.content)) {
         for (const b of block.content) {
-          if (isRecord(b) && b.type === "text" && typeof b.text === "string") b.text = REDACTED_NOTE;
+          if (isRecord(b) && isTextBlock(b) && typeof b.text === "string") b.text = REDACTED_NOTE;
         }
       }
     }
@@ -237,12 +231,22 @@ function lastUserIndex(messages: unknown[]): number {
 }
 
 function isHideable(msg: Record<string, unknown>): boolean {
-  return msg.role === "user" || msg.role === "assistant" || msg.role === "tool";
+  return msg.role === "user" || msg.role === "assistant" || msg.role === "tool"
+    || msg.type === "function_call" || msg.type === "function_call_output";
 }
 
 function redactMessageAt(messages: unknown[], i: number): void {
   const msg = messages[i];
   if (!isRecord(msg)) return;
+  if (msg.type === "function_call") {
+    msg.arguments = "{}";
+    return;
+  }
+  if (msg.type === "function_call_output") {
+    if (typeof msg.output === "string") msg.output = REDACTED_NOTE;
+    else redactBlocks(msg.output);
+    return;
+  }
   if (typeof msg.content === "string") {
     msg.content = REDACTED_NOTE;
   } else if (Array.isArray(msg.content)) {
@@ -260,7 +264,7 @@ function redactMessageAt(messages: unknown[], i: number): void {
 }
 
 function applyPoisonRedaction(payload: Record<string, unknown>): void {
-  const messages = payload.messages;
+  const messages = Array.isArray(payload.messages) ? payload.messages : payload.input;
   if (!Array.isArray(messages) || messages.length === 0) return;
 
   // Prune failed assistant messages carrying error status/text in-place so dead error turns do not linger
@@ -340,7 +344,7 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
         for (let i = 0; i < lastUser; i++) {
           if (!isRecord(messages[i])) continue;
           const m = messages[i] as Record<string, unknown>;
-          if (m.role !== "assistant" && m.role !== "tool") continue;
+          if (!isHideable(m) || m.role === "user") continue;
           if (redactSet.has(fps[i])) continue;
           redactSet.add(fps[i]);
           if (hasRedactableText(m.content, m)) {
@@ -372,22 +376,28 @@ function patchAgentRouterPayload(payload: unknown): void {
     payload.system = enforceCanonicalRootPrompt(payload.system);
   }
 
-  if (!Array.isArray(payload.messages) || payload.messages.length === 0) return;
+  const textType = Array.isArray(payload.messages) ? "text" : "input_text";
+  if (payload.instructions !== undefined) {
+    payload.instructions = enforceCanonicalRootPrompt(payload.instructions, textType);
+  }
+  if (typeof payload.input === "string") payload.input = prependUserPreamble(payload.input, textType);
+  const messages = Array.isArray(payload.messages) ? payload.messages : payload.input;
+  if (!Array.isArray(messages) || messages.length === 0) return;
 
-  for (const msg of payload.messages) {
+  for (const msg of messages) {
     if (isRecord(msg) && msg.role === "developer") msg.role = "system";
   }
 
-  const first = payload.messages[0];
+  const first = messages[0];
   if (isRecord(first) && (first.role === "system" || first.role === "developer")) {
     first.role = "system";
-    first.content = enforceCanonicalRootPrompt(first.content);
+    first.content = enforceCanonicalRootPrompt(first.content, textType);
   }
 
   // The WAF inspects user content beyond the opening turn (later Indonesian
   // turns and compacted history get blocked too), so frame EVERY user message.
-  for (const msg of payload.messages) {
-    if (isRecord(msg) && msg.role === "user") frameUserTurn(msg);
+  for (const msg of messages) {
+    if (isRecord(msg) && msg.role === "user") frameUserTurn(msg, textType);
   }
 }
 
@@ -405,6 +415,27 @@ export default function (pi: ExtensionAPI) {
       sendSessionAffinityHeaders: true,
     },
     models: [
+      {
+        id: "gpt-6-astra",
+        name: "GPT-6 Astra (AgentRouter)",
+        // Chat Completions rejects function tools with reasoning for this model.
+        api: "openai-responses",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        // Provisional limits based on GPT-5.6 Sol; update when AgentRouter confirms Astra's limits.
+        contextWindow: 272000,
+        maxTokens: 16384,
+        thinkingLevelMap: {
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+        },
+        compat: {
+          supportsDeveloperRole: false,
+        },
+      },
       {
         id: "gpt-5.6-sol",
         name: "GPT-5.6 Sol (AgentRouter)",
@@ -542,17 +573,16 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Mutate payload.messages copies (return undefined). Cloning the whole payload
-  // drops provider fields; copying only message objects keeps session state clean.
+  // Clone message trees, including nested tool calls, before sanitizing/redacting.
   pi.on("before_provider_request", (event, ctx) => {
 
     if (!event.payload) return;
     const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
     const payload = event.payload as Record<string, unknown>;
-    if (Array.isArray(payload.messages)) {
-      payload.messages = payload.messages.map((m) => (isRecord(m) ? copyMessage(m) : m));
-    }
+    if (Array.isArray(payload.messages)) payload.messages = structuredClone(payload.messages);
+    if (Array.isArray(payload.input)) payload.input = structuredClone(payload.input);
+    if (Array.isArray(payload.system)) payload.system = structuredClone(payload.system);
     sanitizeInPlace(payload);
     applyPoisonRedaction(payload);
     patchAgentRouterPayload(payload);
