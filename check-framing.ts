@@ -40,6 +40,11 @@ assert.equal(astra.thinkingLevelMap.xhigh, "xhigh");
 assert.deepEqual(astra.input, ["text", "image"]);
 assert.equal(provider.api, "openai-completions");
 assert.equal(provider.models.length, 6);
+// pi ignores provider-level compat for extension providers — it must live on each model.
+assert.equal(provider.compat, undefined);
+for (const m of provider.models) {
+  assert.equal(m.compat?.sendSessionAffinityHeaders, true, `${m.id}: session affinity must be per-model`);
+}
 assert.equal(provider.models.find((m: Wire) => m.id === "claude-opus-5").api, "anthropic-messages");
 const foreign = { model: "gpt-6-astra", input: [{ role: "user", content: "hello" }] };
 const foreignSaved = structuredClone(foreign);
