@@ -145,7 +145,6 @@ const SENSITIVE_WORDS_RE = /sensitive[_ ]words?[_ ]detected/i;
 // Keep the placeholder WAF-neutral; wording about the filter previously
 // triggered additional content-filter rejections.
 const REDACTED_NOTE = "[Message withheld by local policy]";
-const MAX_REDACTED = 1000;
 
 const redactSet = new Set<string>();
 let escalatePending = false;
@@ -401,6 +400,16 @@ function patchAgentRouterPayload(payload: unknown): void {
   }
 }
 
+/**
+ * pi reads `compat` from the MODEL entry only — provider-level compat is ignored
+ * for extension-registered providers (it is merged only for models.json).
+ * Single source of truth, spread into every model below.
+ */
+const AGENTROUTER_COMPAT = {
+  supportsDeveloperRole: false,
+  sendSessionAffinityHeaders: true,
+} as const;
+
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("agentrouter", {
     baseUrl: "https://agentrouter.org/v1",
@@ -410,9 +419,6 @@ export default function (pi: ExtensionAPI) {
       "Originator": "codex_cli_rs",
       "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
       "Version": "0.101.0",
-    },
-    compat: {
-      sendSessionAffinityHeaders: true,
     },
     models: [
       {
@@ -432,9 +438,7 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: {
-          supportsDeveloperRole: false,
-        },
+        compat: { ...AGENTROUTER_COMPAT },
       },
       {
         id: "gpt-5.6-sol",
@@ -450,9 +454,7 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: {
-          supportsDeveloperRole: false,
-        },
+        compat: { ...AGENTROUTER_COMPAT },
       },
       {
         id: "deepseek-v4-flash",
@@ -470,7 +472,7 @@ export default function (pi: ExtensionAPI) {
           xhigh: "xhigh",
         },
         compat: {
-          supportsDeveloperRole: false,
+          ...AGENTROUTER_COMPAT,
           requiresReasoningContentOnAssistantMessages: true,
           thinkingFormat: "deepseek",
         },
@@ -492,9 +494,7 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "max",
         },
-        compat: {
-          supportsDeveloperRole: false,
-        },
+        compat: { ...AGENTROUTER_COMPAT },
       },
       // Claude models ride the Anthropic Messages API via per-model overrides
       {
@@ -521,11 +521,7 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: {
-          supportsDeveloperRole: false,
-          cacheControlFormat: "anthropic",
-          sendSessionAffinityHeaders: true,
-        },
+        compat: { ...AGENTROUTER_COMPAT, cacheControlFormat: "anthropic" },
       },
       {
         id: "claude-opus-5",
@@ -551,11 +547,7 @@ export default function (pi: ExtensionAPI) {
           high: "high",
           xhigh: "xhigh",
         },
-        compat: {
-          supportsDeveloperRole: false,
-          cacheControlFormat: "anthropic",
-          sendSessionAffinityHeaders: true,
-        },
+        compat: { ...AGENTROUTER_COMPAT, cacheControlFormat: "anthropic" },
       },
     ],
   });
