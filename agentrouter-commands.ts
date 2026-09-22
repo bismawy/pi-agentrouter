@@ -1,9 +1,9 @@
 /**
  * AgentRouter accounting commands for pi.
  *
- * Registers:
- *   /agentrouter-status  live per-model quota + pricing + endpoint
- *   /agentrouter-usage   monthly provider billing total + per-model cost
+ * Registers one command with subcommands:
+ *   /agentrouter status  live per-model quota + pricing + endpoint
+ *   /agentrouter usage   monthly provider billing total + per-model cost
  *
  * Neither command needs a browser cookie. AgentRouter exposes pricing publicly
  * and billing through the OpenAI-compatible billing endpoint, which
@@ -16,6 +16,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +40,7 @@ const SESSIONS_DIR = join(AGENTROUTER_DIR, "sessions");
 /**
  * Pricing is stable on a daily scale, so a 24h snapshot is enough. The snapshot
  * exists because registerProvider() runs synchronously and cannot await a
- * network call; /agentrouter-status always fetches live.
+ * network call; /agentrouter status always fetches live.
  */
 const PRICING_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -567,20 +568,34 @@ async function buildUsageReport(apiKey: string | null): Promise<string> {
   return lines.join("\n");
 }
 
-export function registerAgentRouterCommands(pi: ExtensionAPI): void {
-  pi.registerCommand("agentrouter-status", {
-    description: "Show live AgentRouter model status: quota, pricing, and endpoint.",
-    handler: async (_args, ctx) => {
-      const report = await buildStatusReport(readApiKey());
-      ctx.ui.notify(report, "info");
-    },
-  });
+const AGENTROUTER_SUBCOMMANDS: AutocompleteItem[] = [
+  { value: "status", label: "status", description: "Live per-model quota, pricing, and endpoint" },
+  { value: "usage", label: "usage", description: "Monthly billing total and per-model cost from local sessions" },
+];
 
-  pi.registerCommand("agentrouter-usage", {
-    description: "Show AgentRouter usage: monthly billing total and per-model cost from local sessions.",
-    handler: async (_args, ctx) => {
-      const report = await buildUsageReport(readApiKey());
-      ctx.ui.notify(report, "info");
+export function registerAgentRouterCommands(pi: ExtensionAPI): void {
+  pi.registerCommand("agentrouter", {
+    description: "AgentRouter account: status (quota/pricing/endpoint) | usage (billing)",
+    getArgumentCompletions: (prefix) => {
+      const items = AGENTROUTER_SUBCOMMANDS.filter((s) => s.value.startsWith(prefix.toLowerCase()));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      const sub = args.trim().toLowerCase();
+      if (sub === "status") {
+        ctx.ui.notify(await buildStatusReport(readApiKey()), "info");
+        return;
+      }
+      if (sub === "usage") {
+        ctx.ui.notify(await buildUsageReport(readApiKey()), "info");
+        return;
+      }
+      ctx.ui.notify(
+        sub === ""
+          ? "[agentrouter] Use: /agentrouter status | /agentrouter usage"
+          : `[agentrouter] Unknown argument "${sub}". Use: status | usage.`,
+        sub === "" ? "info" : "warning"
+      );
     },
   });
 }

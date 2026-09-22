@@ -24,13 +24,25 @@ register({
 } as unknown as ExtensionAPI);
 
 // PROBE_TARGETS_DRIFT_CHECK: commands and probe targets must stay in step with the
-// registered provider - drift would make /agentrouter-status probe an endpoint the
+// registered provider - drift would make /agentrouter status probe an endpoint the
 // model never uses, or advertise a command that does not exist.
-assert.deepEqual([...commands.keys()].sort(), ["agentrouter-status", "agentrouter-usage"]);
+assert.deepEqual([...commands.keys()].sort(), ["agentrouter"]);
 for (const [name, options] of commands) {
   assert.equal(typeof options.handler, "function", `${name} needs a handler`);
   assert.ok(options.description, `${name} needs a description`);
 }
+// Subcommand completions must cover exactly the accepted arguments.
+assert.deepEqual(
+  (commands.get("agentrouter")!.getArgumentCompletions!("") ?? []).map((i) => i.value),
+  ["status", "usage"]
+);
+// Dispatch check: bad input is rejected locally, without touching the network.
+const notices: string[] = [];
+const probeCtx = { ui: { notify: (message: string) => notices.push(message) } };
+await commands.get("agentrouter")!.handler("bogus", probeCtx);
+assert.match(notices.at(-1)!, /Unknown argument "bogus"/);
+await commands.get("agentrouter")!.handler("", probeCtx);
+assert.match(notices.at(-1)!, /status \| \/agentrouter usage/);
 const registered = new Map<string, { api: string; baseUrl: string }>(
   (provider.models as Wire[]).map((m) => [
     m.id as string,
