@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import register from "./index.ts";
-import { AGENTROUTER_PROBE_TARGETS, renderStatusBody } from "./agentrouter-commands.ts";
+import { AGENTROUTER_PROBE_TARGETS, renderStatusBody, renderUsageBody } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
 type Wire = Record<string, any>;
@@ -107,6 +107,34 @@ const keyMissing = renderStatusBody(
   plainClip,
 ).map(stripAnsi).join("\n");
 assert.match(keyMissing, /no API key/);
+
+// USAGE_PANEL_CHECK: usage report renders cleanly with identical theme framing
+type UsageRep = Parameters<typeof renderUsageBody>[0];
+const sampleUsage: UsageRep = {
+  month: "September 2026",
+  providerTotal: "$12.45",
+  providerTotalState: "ok",
+  localFiles: 4,
+  localRecords: 12,
+  sinceDate: "2026-09-01",
+  rows: [
+    {
+      model: "claude-opus-5",
+      usage: { input: 20000, output: 5000, cacheRead: 10000, cacheWrite: 0 },
+      cost: 0.27,
+    },
+  ],
+  totalCost: 0.27,
+  fullyPriced: true,
+};
+
+for (const width of [120, 60, 45]) {
+  const lines = renderUsageBody(sampleUsage, fakeTheme, width, plainClip).map(stripAnsi);
+  const overflow = lines.find((line) => displayWidth(line) > width);
+  assert.equal(overflow, undefined, `usage line overflows ${width}: ${overflow}`);
+  assert.ok(lines.some((l) => l.includes("claude-opus-5")), "model row missing in usage panel");
+}
+assert.ok(renderUsageBody(sampleUsage, fakeTheme, 100, plainClip).map(stripAnsi).some((l) => l.includes("$12.45")), "provider total shown");
 const registered = new Map<string, { api: string; baseUrl: string }>(
   (provider.models as Wire[]).map((m) => [
     m.id as string,
