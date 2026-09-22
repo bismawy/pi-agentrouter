@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import register from "./index.ts";
-import { AGENTROUTER_PROBE_TARGETS } from "./agentrouter-commands.ts";
+import { AGENTROUTER_PROBE_TARGETS, renderStatusBody } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
 type Wire = Record<string, any>;
@@ -43,6 +43,70 @@ await commands.get("agentrouter")!.handler("bogus", probeCtx);
 assert.match(notices.at(-1)!, /Unknown argument "bogus"/);
 await commands.get("agentrouter")!.handler("", probeCtx);
 assert.match(notices.at(-1)!, /status \| \/agentrouter usage/);
+
+// STATUS_PANEL_CHECK: the panel is a fixed-width table, so every line must fit the
+// width, colour must follow meaning, and a long provider error must be clipped.
+type Report = Parameters<typeof renderStatusBody>[0];
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+const colorsUsed = new Set<string>();
+const fakeTheme = {
+  fg: (color: string, text: string) => {
+    colorsUsed.add(color);
+    return text;
+  },
+  bold: (text: string) => text,
+} as unknown as Parameters<typeof renderStatusBody>[1];
+const statusPanel = {
+  keyMissing: false,
+  pricingState: "live",
+  pricingNote: "live, refreshed now (snapshot TTL 24h)",
+  rows: [
+    { id: "gpt-6-astra", api: "openai-responses", state: "ready", detail: "ready", price: { inputPerMillion: 4, outputPerMillion: 20 } },
+    {
+      id: "glm-5.3",
+      api: "openai-completions",
+      state: "error",
+      detail: "HTTP 503: 当前分组 default 下对于模型 glm-5.3 无可用渠道 (request id: 20260922192743640594808h4fpkV1XoX1Mn)",
+      price: null,
+    },
+    { id: "claude-opus-5", api: "anthropic-messages", state: "quota", detail: "quota exhausted (402)", price: { inputPerMillion: 6, outputPerMillion: 30 } },
+  ],
+} as unknown as Report;
+
+// Display width, not string length: the provider errors are Chinese, and a wide
+// glyph that is counted as one column is how a panel line ends up overflowing.
+const displayWidth = (text: string) =>
+  [...text].reduce((sum, ch) => sum + (/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60]/u.test(ch) ? 2 : 1), 0);
+const plainClip = (text: string, width: number) => {
+  let out = "";
+  for (const ch of text) {
+    if (displayWidth(out + ch) > width - 1) return out + "…";
+    out += ch;
+  }
+  return out;
+};
+const renderPanel = (width: number) => renderStatusBody(statusPanel, fakeTheme, width, plainClip).map(stripAnsi);
+
+for (const width of [140, 60, 40]) {
+  const overflow = renderPanel(width).find((line) => displayWidth(line) > width);
+  assert.equal(overflow, undefined, `panel line overflows ${width}: ${overflow}`);
+  assert.ok(renderPanel(width).some((line) => line.includes("glm-5.3")), `model row missing at width ${width}`);
+}
+// A wide panel shows the status column in full; only the long error is clipped.
+const wide = renderPanel(140);
+assert.ok(wide.some((line) => line.trimEnd().endsWith("ready")), "ready row must not be clipped at full width");
+assert.ok(wide.some((line) => line.includes("quota exhausted (402)")), "short statuses must survive at full width");
+assert.ok(renderPanel(60).some((line) => line.endsWith("…")), "long error detail must be clipped");
+for (const color of ["accent", "dim", "muted", "success", "warning", "error"]) {
+  assert.ok(colorsUsed.has(color), `panel never uses the "${color}" theme colour`);
+}
+const keyMissing = renderStatusBody(
+  { keyMissing: true, rows: [], pricingNote: "no API key", pricingState: "missing" } as unknown as Report,
+  fakeTheme,
+  80,
+  plainClip,
+).map(stripAnsi).join("\n");
+assert.match(keyMissing, /no API key/);
 const registered = new Map<string, { api: string; baseUrl: string }>(
   (provider.models as Wire[]).map((m) => [
     m.id as string,

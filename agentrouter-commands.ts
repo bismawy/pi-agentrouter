@@ -15,8 +15,8 @@
  *                                            (Bearer <apiKey>, max_tokens=1) -> 200 vs 402
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -450,16 +450,36 @@ function costOf(usage: UsageTotals, price: PricingEntry | undefined): number | n
  * Commands
  * ------------------------------------------------------------------ */
 
-async function buildStatusReport(apiKey: string | null): Promise<string> {
-  const lines: string[] = ["AgentRouter model status", ""];
+interface StatusRow {
+  id: string;
+  api: string;
+  state: ProbeResult["state"];
+  detail: string;
+  price: PricingEntry | null;
+}
 
+interface StatusReport {
+  /** No key configured: every other field is empty and the panel says so. */
+  keyMissing: boolean;
+  rows: StatusRow[];
+  pricingNote: string;
+  /** "live" = endpoint answered, "stale" = 24h snapshot reused, "missing" = neither. */
+  pricingState: "live" | "stale" | "missing";
+}
+
+async function buildStatusReport(apiKey: string | null): Promise<StatusReport> {
   if (!apiKey) {
-    lines.push("No API key found. Set AGENTROUTER_API_KEY or run /login agentrouter.");
-    return lines.join("\n");
+    return {
+      keyMissing: true,
+      rows: [],
+      pricingNote: "no API key — set AGENTROUTER_API_KEY or run /login agentrouter",
+      pricingState: "missing",
+    };
   }
 
   let prices = new Map<string, PricingEntry>();
-  let pricingNote = "live";
+  let pricingNote = `live, refreshed now (snapshot TTL ${PRICING_TTL_MS / 3_600_000}h)`;
+  let pricingState: StatusReport["pricingState"] = "live";
   try {
     prices = await fetchPricing();
     writePricingCache(prices);
@@ -467,33 +487,187 @@ async function buildStatusReport(apiKey: string | null): Promise<string> {
     const cached = readPricingCache();
     prices = new Map(Object.entries(cached?.prices ?? {}));
     const message = error instanceof Error ? error.message : String(error);
+    pricingState = cached ? "stale" : "missing";
     pricingNote = cached
-      ? `cached ${new Date(cached.fetchedAt).toISOString()} (live fetch failed: ${message})`
+      ? `snapshot of ${new Date(cached.fetchedAt).toISOString()} (live fetch failed: ${message})`
       : `unavailable (${message})`;
   }
 
   const results = await Promise.all(AGENTROUTER_PROBE_TARGETS.map((t) => probeModel(t, apiKey)));
+  return {
+    keyMissing: false,
+    rows: results.map((r) => ({ ...r, price: prices.get(r.id) ?? null })),
+    pricingNote,
+    pricingState,
+  };
+}
 
-  lines.push("MODEL               INPUT/1M   OUTPUT/1M   ENDPOINT            STATUS");
-  for (const result of results) {
-    const price = prices.get(result.id);
+const STATUS_HEADERS = ["MODEL", "INPUT/1M", "OUTPUT/1M", "ENDPOINT", "STATUS"] as const;
+
+/** Column widths come from the data, so a short table stays tight and a long model id never overflows. */
+function statusColumnWidths(rows: StatusRow[]): number[] {
+  const cells = (row: StatusRow) => [row.id, priceLabel(row.price)[0], priceLabel(row.price)[1], row.api];
+  return STATUS_HEADERS.slice(0, 4).map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => cells(row)[i].length)),
+  );
+}
+
+function priceLabel(price: PricingEntry | null): [string, string] {
+  return price ? [usd(price.inputPerMillion), usd(price.outputPerMillion)] : ["?", "?"];
+}
+
+/** Plain-text fallback: print mode, RPC, and any client without a TUI. */
+function renderStatusText(report: StatusReport): string {
+  const lines: string[] = ["AgentRouter · Status", "Live model availability, pricing, and per-model endpoint.", ""];
+  if (report.keyMissing) {
+    lines.push(`Pricing: ${report.pricingNote}`);
+    return lines.join("\n");
+  }
+
+  const widths = statusColumnWidths(report.rows);
+  lines.push(STATUS_HEADERS.map((h, i) => (i === 4 ? h : h.padEnd(widths[i]!))).join("  "));
+  for (const row of report.rows) {
+    const [input, output] = priceLabel(row.price);
     lines.push(
-      result.id.padEnd(20)
-      + (price ? usd(price.inputPerMillion) : "?").padEnd(11)
-      + (price ? usd(price.outputPerMillion) : "?").padEnd(12)
-      + result.api.padEnd(20)
-      + result.detail,
+      [row.id.padEnd(widths[0]!), input.padEnd(widths[1]!), output.padEnd(widths[2]!), row.api.padEnd(widths[3]!), row.detail]
+        .join("  "),
     );
   }
 
-  lines.push("");
-  lines.push(`Pricing: ${pricingNote} (snapshot TTL ${PRICING_TTL_MS / 3_600_000}h)`);
-  lines.push("Probe:   POST max_tokens=1 per model, on that model's own endpoint");
-
-  const ready = results.filter((r) => r.state === "ready").length;
-  lines.push(`Ready:   ${ready}/${results.length}`);
-
+  lines.push("", `Pricing: ${report.pricingNote}`, "Probe:   POST max_tokens=1 per model, on that model's own endpoint");
+  lines.push(`Ready:   ${readyLabel(report)}`);
   return lines.join("\n");
+}
+
+function readyLabel(report: StatusReport): string {
+  return `${report.rows.filter((r) => r.state === "ready").length}/${report.rows.length}`;
+}
+
+function readyColor(report: StatusReport): "success" | "warning" | "error" {
+  const ready = report.rows.filter((r) => r.state === "ready").length;
+  if (ready === report.rows.length) return "success";
+  return ready === 0 ? "error" : "warning";
+}
+
+function statusColor(state: StatusRow["state"]): "success" | "warning" | "error" {
+  if (state === "ready") return "success";
+  return state === "quota" ? "warning" : "error";
+}
+
+/**
+ * Width-aware, ANSI-aware clip. The panel passes pi's own truncateToWidth (CJK-correct
+ * and escape-aware); it is a parameter because this file must stay importable under
+ * plain node, where pi's packages do not resolve.
+ */
+type Clip = (text: string, width: number) => string;
+
+/**
+ * The panel body: same data as renderStatusText, one colour per meaning.
+ *
+ * Clipping happens on plain text, never on a coloured line: escape sequences would
+ * count towards the width and slice a column in half. Table rows are assembled from
+ * cells already padded to their computed width, so their visible width is exact.
+ */
+export function renderStatusBody(
+  report: StatusReport,
+  theme: Theme,
+  width: number,
+  clip: Clip,
+): string[] {
+  const pad = " ";
+  const fit = (line: string) => clip(pad + line, width);
+  const lines: string[] = [
+    fit(theme.fg("accent", theme.bold("AgentRouter")) + theme.fg("dim", " · ") + theme.fg("accent", theme.bold("Status"))),
+    fit(theme.fg("muted", "Live model availability, pricing, and per-model endpoint.")),
+    "",
+  ];
+
+  if (report.keyMissing) {
+    lines.push(fit(theme.fg("warning", report.pricingNote)), "");
+    return [...lines, ...statusLegend(report, theme, width, clip)];
+  }
+
+  const widths = statusColumnWidths(report.rows);
+  const cells = widths.reduce((sum, w) => sum + w, 0) + widths.length * 2 + pad.length;
+  // Narrow terminals squeeze the status column to nothing rather than overflowing;
+  // the row is clipped again below as a final guarantee.
+  const detailWidth = Math.max(0, width - cells);
+
+  lines.push(fit(theme.fg("muted", theme.bold(STATUS_HEADERS.slice(0, 4).map((h, i) => h.padEnd(widths[i]!)).join("  ") + "  " + STATUS_HEADERS[4]))));
+  for (const row of report.rows) {
+    const [input, output] = priceLabel(row.price);
+    const priceCell = (value: string, w: number) =>
+      theme.fg(row.price ? "text" : "muted", value.padEnd(w));
+    lines.push(
+      fit(
+        theme.fg("accent", row.id.padEnd(widths[0]!))
+        + "  " + priceCell(input, widths[1]!)
+        + "  " + priceCell(output, widths[2]!)
+        + "  " + theme.fg("dim", row.api.padEnd(widths[3]!))
+        + "  " + theme.fg(statusColor(row.state), clip(row.detail, detailWidth)),
+      ),
+    );
+  }
+
+  const footerLabel = (label: string, value: string, color: "success" | "warning" | "error" | "muted") =>
+    fit(theme.fg("dim", label.padEnd(8)) + theme.fg(color, value));
+  const pricingColor = report.pricingState === "live" ? "success" : report.pricingState === "stale" ? "warning" : "error";
+  lines.push("");
+  lines.push(footerLabel("Pricing", report.pricingNote, pricingColor));
+  lines.push(footerLabel("Probe", "POST max_tokens=1 per model, on that model's own endpoint", "muted"));
+  lines.push(footerLabel("Ready", readyLabel(report), readyColor(report)));
+  lines.push("");
+  return [...lines, ...statusLegend(report, theme, width, clip)];
+}
+
+/** Footer legend in the /vision-watcher picker style: accent count, dim keys. */
+function statusLegend(report: StatusReport, theme: Theme, width: number, clip: Clip): string[] {
+  const count = report.rows.length ? `${report.rows.length} models` : "no models";
+  return [clip(" " + theme.fg("accent", count) + theme.fg("dim", " · [any key] close"), width)];
+}
+
+/** Container body for ctx.ui.custom; colours are recomputed on every render. */
+class AgentRouterStatusPanel implements Component {
+  private readonly report: StatusReport;
+  private readonly theme: Theme;
+  private readonly clip: Clip;
+
+  constructor(report: StatusReport, theme: Theme, clip: Clip) {
+    this.report = report;
+    this.theme = theme;
+    this.clip = clip;
+  }
+
+  render(width: number): string[] {
+    return renderStatusBody(this.report, this.theme, width, this.clip);
+  }
+
+  invalidate(): void {}
+}
+
+/**
+ * Read-only panel framed like the /vision-watcher picker: accent border, any key closes.
+ *
+ * The TUI imports are dynamic because this file's self-check (check-framing.ts) runs
+ * under plain node, where `@earendil-works/*` only resolves inside pi.
+ */
+async function showStatusPanel(ctx: ExtensionCommandContext, report: StatusReport): Promise<void> {
+  const [{ DynamicBorder }, { Container, truncateToWidth }] = await Promise.all([
+    import("@earendil-works/pi-coding-agent"),
+    import("@earendil-works/pi-tui"),
+  ]);
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    const border = () => new DynamicBorder((s: string) => theme.fg("accent", s));
+    const container = new Container();
+    container.addChild(border());
+    container.addChild(new AgentRouterStatusPanel(report, theme, truncateToWidth));
+    container.addChild(border());
+    return {
+      render: (width: number) => container.render(width),
+      invalidate: () => container.invalidate(),
+      handleInput: () => done(),
+    };
+  });
 }
 
 async function buildUsageReport(apiKey: string | null): Promise<string> {
@@ -583,7 +757,12 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const sub = args.trim().toLowerCase();
       if (sub === "status") {
-        ctx.ui.notify(await buildStatusReport(readApiKey()), "info");
+        const report = await buildStatusReport(readApiKey());
+        if (ctx.hasUI && ctx.mode === "tui") {
+          await showStatusPanel(ctx, report);
+          return;
+        }
+        ctx.ui.notify(renderStatusText(report), "info");
         return;
       }
       if (sub === "usage") {
