@@ -44,9 +44,24 @@ for (const target of AGENTROUTER_PROBE_TARGETS) {
   assert.equal(actual.api, target.api, `${target.id}: api drift`);
   assert.equal(actual.baseUrl, target.baseUrl, `${target.id}: baseUrl drift`);
 }
-const ctx = { model: { provider: "agentrouter" }, ui: { notify() {} } };
-function request(payload: Wire): Wire {
-  assert.equal(hooks.get("before_provider_request")!({ payload }, ctx), undefined);
+// Translator stub: stands in for the user's own provider (agentrouter itself
+// would block the Indonesian text we hand it). Deterministic so assertions can
+// compare exact strings, and counted so the cache can be proven.
+const TRANSLATOR = { provider: "antigravity", id: "gemini-flash" };
+let translatorCalls = 0;
+const modelRegistry = {
+  getAvailable: () => [{ provider: "agentrouter", id: "glm-5.3" }, TRANSLATOR],
+  find: (_provider: string, id: string) => (id === TRANSLATOR.id ? TRANSLATOR : undefined),
+  streamSimple: (model: Wire, context: Wire) => {
+    translatorCalls++;
+    const prompt = String(context.messages[0].content);
+    const text = prompt.slice(prompt.lastIndexOf("\n\n") + 2);
+    return { result: async () => ({ content: [{ type: "text", text: `[EN] ${text}` }] }) };
+  },
+};
+const ctx = { model: { provider: "agentrouter" }, modelRegistry, ui: { notify() {} } };
+async function request(payload: Wire): Promise<Wire> {
+  assert.equal(await hooks.get("before_provider_request")!({ payload }, ctx), undefined);
   return payload;
 }
 function blocked(errorMessage = "content-blocked") {
@@ -88,7 +103,7 @@ assert.deepEqual(foreign, foreignSaved, "same model on another provider must not
 for (const field of ["messages", "input"]) {
   const type = field === "input" ? "input_text" : "text";
   for (const prompt of [`AGENTS.md\n\n${HEADER}\n\nMore.`, `${HEADER}\n\nrest`, "Local rules.", []]) {
-    const payload = request({ [field]: [{ role: "developer", content: structuredClone(prompt) }] });
+    const payload = await request({ [field]: [{ role: "developer", content: structuredClone(prompt) }] });
     const system = payload[field][0];
     assert.equal(system.role, "system");
     if (Array.isArray(system.content)) assert.equal(system.content[0].type, type);
@@ -96,13 +111,13 @@ for (const field of ["messages", "input"]) {
     assert.ok(text.startsWith(HEADER));
     if (typeof prompt === "string") assert.ok(text.includes(prompt.split("\n")[0]));
     const before = structuredClone(payload);
-    request(payload);
+    await request(payload);
     assert.deepEqual(payload, before, "root prompt must be idempotent");
   }
   for (const content of ["halo", [], [{ type, text: "halo" }], [{ type: field === "input" ? "input_image" : "image", image_url: "https://example.com/test.png" }]]) {
     const source = [{ role: "user", content }];
     const original = structuredClone(source);
-    const payload = request({ [field]: source });
+    const payload = await request({ [field]: source });
     assert.deepEqual(source, original, "framing must not mutate session messages");
     const framed = payload[field][0].content;
     if (Array.isArray(framed)) {
@@ -110,15 +125,15 @@ for (const field of ["messages", "input"]) {
       assert.ok(framed[0].text.startsWith(PREAMBLE));
     } else assert.ok(framed.startsWith(PREAMBLE));
     const before = structuredClone(payload);
-    request(payload);
+    await request(payload);
     assert.deepEqual(payload, before, "user framing must be idempotent");
   }
 }
-assert.equal(request({ input: "halo", instructions: "Local rules." }).input, `${PREAMBLE}\n\nhalo`);
-assert.ok(request({ input: [], instructions: "Local rules." }).instructions.startsWith(HEADER));
+assert.equal((await request({ input: "halo", instructions: "Local rules." })).input, `${PREAMBLE}\n\nhalo`);
+assert.ok((await request({ input: [], instructions: "Local rules." })).instructions.startsWith(HEADER));
 const anthropic = [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] }];
-assert.deepEqual(request({ messages: structuredClone(anthropic) }).messages, anthropic);
-assert.equal(request({ messages: [{ role: "user", content: "a\u001b[31mb\u0000\ud800" }] }).messages[0].content, `${PREAMBLE}\n\nab`);
+assert.deepEqual((await request({ messages: structuredClone(anthropic) })).messages, anthropic);
+assert.equal((await request({ messages: [{ role: "user", content: "a\u001b[31mb\u0000\ud800" }] })).messages[0].content, `${PREAMBLE}\n\nab`);
 
 // Responses reasoning/reference/function items have no role or content.
 const history: Wire[] = [
@@ -134,18 +149,18 @@ const history: Wire[] = [
   { type: "function_call_output", call_id: "call_new", output: "new result" },
 ];
 const saved = structuredClone(history);
-const normal = request({ input: history });
+const normal = await request({ input: history });
 assert.deepEqual(history, saved);
 assert.deepEqual(normal.input.slice(2, 6), saved.slice(2, 6));
 blocked();
-const stage1 = request({ input: history });
+const stage1 = await request({ input: history });
 assert.equal(stage1.input[1].content[0].text, `${PREAMBLE}\n\n${NOTE}`);
 assert.equal(stage1.input[6].content[0].text, "old answer");
 assert.deepEqual(stage1.input.slice(7), normal.input.slice(7));
-const sticky = request({ input: history });
+const sticky = await request({ input: history });
 assert.deepEqual(sticky, stage1);
 blocked();
-const stage2 = request({ input: history });
+const stage2 = await request({ input: history });
 assert.equal(stage2.input[4].arguments, "{}");
 assert.equal(stage2.input[5].output, NOTE);
 assert.equal(stage2.input[6].content[0].text, NOTE);
@@ -158,9 +173,9 @@ assert.deepEqual(history, saved, "redaction must not mutate session history");
 // Multimodal function output redacts text without changing images or block types.
 const multimodal = structuredClone(history);
 multimodal[5].output = [{ type: "input_text", text: "old output text" }, { type: "input_image", image_url: "https://example.com/test.png" }];
-request({ input: multimodal });
+await request({ input: multimodal });
 blocked("sensitive_words_detected");
-const multimodalResult = request({ input: multimodal });
+const multimodalResult = await request({ input: multimodal });
 assert.equal(multimodalResult.input[5].output[0].text, NOTE);
 assert.equal(multimodalResult.input[5].output[0].type, "input_text");
 assert.deepEqual(multimodalResult.input[5].output[1], multimodal[5].output[1]);
@@ -168,14 +183,14 @@ assert.equal(multimodal[5].output[0].text, "old output text");
 
 // Same-type tool items must have distinct sticky fingerprints; new history stays visible.
 const extended = [...history, { role: "user", content: "next question" }];
-const extendedResult = request({ input: extended });
+const extendedResult = await request({ input: extended });
 assert.equal(extendedResult.input[8].arguments, saved[8].arguments);
 assert.equal(extendedResult.input[9].output, saved[9].output);
-const fresh = request({ input: [{ role: "user", content: "fresh session" }] });
+const fresh = await request({ input: [{ role: "user", content: "fresh session" }] });
 assert.equal(fresh.input[0].content, `${PREAMBLE}\n\nfresh session`);
-request({ input: history });
+await request({ input: history });
 blocked("sensitive_words_detected");
-assert.deepEqual(request({ input: history }), stage2, "sensitive error redacts older turns in one pass");
+assert.deepEqual(await request({ input: history }), stage2, "sensitive error redacts older turns in one pass");
 
 // Chat Completions null/missing content, nested tool calls, and error pruning.
 const chat: Wire[] = [
@@ -187,10 +202,10 @@ const chat: Wire[] = [
   { role: "assistant", content: "failed", stopReason: "error" },
   { role: "user", content: "continue chat" },
 ];
-request({ messages: chat });
+await request({ messages: chat });
 blocked("sensitive_words_detected");
 const chatSaved = structuredClone(chat);
-const redacted = request({ messages: chat }).messages;
+const redacted = (await request({ messages: chat })).messages;
 assert.equal(redacted.length, 6);
 assert.equal(redacted[2].tool_calls[0].function.arguments, "{}");
 assert.equal(redacted[3].content, NOTE);
@@ -204,12 +219,61 @@ const turns: Wire[] = [
   { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "result" }] }] },
   { role: "user", content: "continue anthropic" },
 ];
-request({ messages: turns });
+await request({ messages: turns });
 blocked();
 const turnsSaved = structuredClone(turns);
-const result = request({ messages: turns }).messages;
+const result = (await request({ messages: turns })).messages;
 assert.equal(result[2].content[0].content[0].text, NOTE);
 assert.equal(result[2].content[0].type, "tool_result");
 assert.equal(result[2].content[0].tool_use_id, result[1].content[0].id);
 assert.deepEqual(turns, turnsSaved);
-console.log("ok: model registration, framing, Responses items, redaction, and legacy protocols");
+
+// --- On-demand translation ---------------------------------------------------
+// When there is nothing older to redact the newest turn is the trigger, and it
+// used to be a dead end. Measured against the live gateway: the Indonesian
+// message alone returns 400 content-blocked while its translation returns 200.
+const ID_PREAMBLE = PREAMBLE.replace(
+  "respond thoroughly in the requested language",
+  "respond thoroughly in Indonesian",
+);
+const ID_TURN = "Tolong jelaskan bagaimana antrean pesan ini bekerja di dalam aplikasi.";
+const firstTurn: Wire[] = [{ role: "user", content: ID_TURN }];
+
+const plain = await request({ messages: structuredClone(firstTurn) });
+assert.equal(plain.messages[0].content, `${PREAMBLE}\n\n${ID_TURN}`, "no translation before a block");
+blocked();
+const callsBefore = translatorCalls;
+const translated = await request({ messages: firstTurn });
+assert.equal(translated.messages[0].content, `${ID_PREAMBLE}\n\n[EN] ${ID_TURN}`);
+assert.equal(translatorCalls, callsBefore + 1);
+assert.equal(firstTurn[0].content, ID_TURN, "session history must stay Indonesian");
+
+// Sticky: the turn stays English on the next request, without a second call.
+const again = await request({ messages: structuredClone(firstTurn) });
+assert.equal(again.messages[0].content, `${ID_PREAMBLE}\n\n[EN] ${ID_TURN}`);
+assert.equal(translatorCalls, callsBefore + 1, "cached translation must not re-call the model");
+
+// A translation that still gets blocked must stop retrying, not loop forever.
+const giveUp = hooks.get("message_end")!({
+  message: { role: "assistant", provider: "agentrouter", stopReason: "error", errorMessage: "content-blocked" },
+}, ctx);
+assert.equal(giveUp, undefined, "no further retry once translation was tried");
+
+// English turns and fenced code are left alone.
+const englishTurn: Wire[] = [{ role: "user", content: "Explain the message queue in this app." }];
+const englishResult = await request({ messages: englishTurn });
+assert.equal(englishResult.messages[0].content, `${PREAMBLE}\n\nExplain the message queue in this app.`);
+const codeTurn: Wire[] = [{
+  role: "user",
+  content: "Jelaskan berkas ini untuk saya.\n```js\nconst a = 1; // jangan diubah\n```\nJelaskan juga bagian penutupnya.",
+}];
+await request({ messages: structuredClone(codeTurn) });
+blocked();
+const codeResult = await request({ messages: codeTurn });
+assert.equal(
+  codeResult.messages[0].content,
+  `${ID_PREAMBLE}\n\n[EN] Jelaskan berkas ini untuk saya.\n\`\`\`js\nconst a = 1; // jangan diubah\n\`\`\`\n[EN] Jelaskan juga bagian penutupnya.`,
+  "prose translated, fenced code verbatim, layout preserved",
+);
+
+console.log("ok: model registration, framing, Responses items, redaction, translation, and legacy protocols");

@@ -63,6 +63,16 @@ const PI_HEADER_RE =
 const LANGUAGE_PREAMBLE =
   "[Instruction: You are an expert coding assistant operating inside pi. Please carefully analyze the technical context, understand the user request, follow all project instructions and coding standards, and respond thoroughly in the requested language.]";
 
+// Any framed turn starts with this sentinel, whatever preamble variant was used.
+const PREAMBLE_SENTINEL = "[Instruction: You are an expert coding assistant operating inside pi.";
+
+// Variant for turns that were translated into English: the text is English now,
+// but the user still asked in Indonesian and expects the answer in Indonesian.
+const LANGUAGE_PREAMBLE_ID = LANGUAGE_PREAMBLE.replace(
+  "respond thoroughly in the requested language",
+  "respond thoroughly in Indonesian",
+);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -97,20 +107,20 @@ function enforceCanonicalRootPrompt(systemPrompt: unknown, textType = "text"): u
   return systemPrompt;
 }
 
-function prependUserPreamble(content: unknown, textType = "text"): unknown {
+function prependUserPreamble(content: unknown, preamble = LANGUAGE_PREAMBLE, textType = "text"): unknown {
   if (typeof content === "string") {
-    if (content.startsWith(LANGUAGE_PREAMBLE)) return content;
-    return content ? `${LANGUAGE_PREAMBLE}\n\n${content}` : LANGUAGE_PREAMBLE;
+    if (content.startsWith(PREAMBLE_SENTINEL)) return content;
+    return content ? `${preamble}\n\n${content}` : preamble;
   }
   if (!Array.isArray(content)) return content;
-  if (content.length === 0) return [{ type: textType, text: LANGUAGE_PREAMBLE }];
+  if (content.length === 0) return [{ type: textType, text: preamble }];
   const head = content[0];
   if (isRecord(head) && head.type === textType && typeof head.text === "string") {
-    if (head.text.startsWith(LANGUAGE_PREAMBLE)) return content;
-    head.text = `${LANGUAGE_PREAMBLE}\n\n${head.text}`;
+    if (head.text.startsWith(PREAMBLE_SENTINEL)) return content;
+    head.text = `${preamble}\n\n${head.text}`;
     return content;
   }
-  return [{ type: textType, text: LANGUAGE_PREAMBLE }, ...content];
+  return [{ type: textType, text: preamble }, ...content];
 }
 
 function isAgentRouterCall(payload: unknown, provider?: string, baseUrl?: string): boolean {
@@ -129,7 +139,8 @@ function frameUserTurn(msg: Record<string, unknown>, textType = "text"): void {
     const head = msg.content[0];
     if (isRecord(head) && head.type === "tool_result") return;
   }
-  msg.content = prependUserPreamble(msg.content, textType);
+  const preamble = translatedNow.has(fingerprintOf(msg)) ? LANGUAGE_PREAMBLE_ID : LANGUAGE_PREAMBLE;
+  msg.content = prependUserPreamble(msg.content, preamble, textType);
 }
 
 // --- Poisoned-history auto-recovery (1.3.0) --------------------------------
@@ -153,6 +164,18 @@ let isSensitiveBlock = false;
 let exhausted = false;
 let sessionAnchor: string | null = null;
 let wafNotified = false;
+
+// On-demand translation state (1.5.0). `translatedTurns` is sticky like
+// `redactSet`: once a turn was translated it stays English for the session.
+const translatedTurns = new Set<string>();
+// Fingerprints as they look AFTER replacement, so framing knows which turns are
+// currently English and must get the reply-in-Indonesian preamble variant.
+let translatedNow = new Set<string>();
+const translationCache = new Map<string, string>();
+let translatePending = false;
+let translateTried = false;
+let lastPromptFingerprint = "";
+let translating = false;
 
 function fingerprintOf(msg: Record<string, unknown>): string {
   const tc = Array.isArray(msg.tool_calls) ? JSON.stringify(msg.tool_calls).slice(0, 80) : "";
@@ -296,6 +319,9 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
       isSensitiveBlock = false;
       exhausted = false;
       wafNotified = false;
+      translatedTurns.clear();
+      translatePending = false;
+      translateTried = false;
     }
   }
 
@@ -369,6 +395,244 @@ function applyPoisonRedaction(payload: Record<string, unknown>): void {
   }
 }
 
+// --- On-demand translation (1.5.0) ------------------------------------------
+// The WAF scores the language mix of the WHOLE body. Redaction removes poisoned
+// history, but it cannot help when the newest turn is the trigger (first message
+// of a session, or one long Indonesian message) — that turn used to be a dead
+// end. Translating it keeps its meaning while flipping the body back to English,
+// which is what the filter actually gates on. Measured against the live gateway:
+// the Indonesian message alone returns `400 content-blocked`, its translation 200.
+const TRANSLATE_ENABLED = process.env.AGENTROUTER_TRANSLATE !== "0";
+// "provider/modelId" to pin the translator model; otherwise the cheapest
+// available non-AgentRouter model is used (AgentRouter itself would block the
+// Indonesian text we are asking it to translate).
+const TRANSLATOR_OVERRIDE = process.env.AGENTROUTER_TRANSLATOR ?? "";
+const MAX_TRANSLATE_CHARS = 8000;
+const MAX_TRANSLATION_CACHE = 200;
+
+const TRANSLATION_PROMPT =
+  "Translate the user message below into English. Output only the translation: no notes, " +
+  "no quotes, no preamble. Keep code, file paths, identifiers, and numbers exactly as they " +
+  "are. If the text is already English, return it unchanged.\n\n";
+
+// Indonesian function words; their absence means there is nothing to translate.
+const INDONESIAN_RE =
+  /\b(yang|dan|atau|dengan|untuk|tidak|saya|kita|anda|ini|itu|adalah|akan|sudah|belum|bisa|harus|dari|pada|agar|supaya|karena|jika|kalau|tolong|mohon|jangan|mana|bagaimana|mengapa|seperti|juga|masih|setelah|sebelum)\b/i;
+
+// Fenced blocks are code: translating them would corrupt the request.
+const CODE_FENCE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~/g;
+
+type TranslatorContext = {
+  signal?: AbortSignal;
+  modelRegistry?: {
+    getAvailable?: () => any[];
+    find?: (provider: string, modelId: string) => any;
+    streamSimple?: (model: any, context: unknown, options?: unknown) => { result(): Promise<any> };
+    complete?: (model: any, context: unknown, options?: unknown) => Promise<any>;
+  };
+};
+
+function translatorCandidates(ctx: TranslatorContext): any[] {
+  const registry = ctx.modelRegistry;
+  if (!registry) return [];
+  if (TRANSLATOR_OVERRIDE) {
+    const slash = TRANSLATOR_OVERRIDE.indexOf("/");
+    if (slash < 0) return [];
+    const model = registry.find?.(TRANSLATOR_OVERRIDE.slice(0, slash), TRANSLATOR_OVERRIDE.slice(slash + 1));
+    return model ? [model] : [];
+  }
+  return (registry.getAvailable?.() ?? [])
+    .filter((model) => !String(model?.provider ?? "").toLowerCase().includes("agentrouter"))
+    .map((model) => ({
+      model,
+      // Cheap, fast models first; the user's own OAuth providers next.
+      rank:
+        (/flash|lite|mini|haiku|small|free/i.test(String(model?.id)) ? 0 : 2) +
+        (/antigravity|cline|freeflow/i.test(String(model?.provider)) ? 0 : 1),
+    }))
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 2)
+    .map((entry) => entry.model);
+}
+
+// Splits a turn into translatable prose and untouched fenced code.
+function textSegments(text: string): { code: boolean; value: string }[] {
+  const segments: { code: boolean; value: string }[] = [];
+  let last = 0;
+  for (const match of text.matchAll(CODE_FENCE_RE)) {
+    const index = match.index ?? 0;
+    if (index > last) segments.push({ code: false, value: text.slice(last, index) });
+    segments.push({ code: true, value: match[0] });
+    last = index + match[0].length;
+  }
+  if (last < text.length) segments.push({ code: false, value: text.slice(last) });
+  return segments;
+}
+
+async function callTranslator(ctx: TranslatorContext, text: string): Promise<string | null> {
+  // A nested model call must never re-enter this handler.
+  if (translating) return null;
+  translating = true;
+  try {
+    const registry = ctx.modelRegistry!;
+    const context = { messages: [{ role: "user", content: `${TRANSLATION_PROMPT}${text}`, timestamp: Date.now() }] };
+    const options = { maxTokens: 2048, ...(ctx.signal ? { signal: ctx.signal } : {}) };
+    for (const model of translatorCandidates(ctx)) {
+      try {
+        const stream = registry.streamSimple?.(model, context, options);
+        const answer = stream ? await stream.result() : await registry.complete?.(model, context, options);
+        const output = (answer?.content ?? [])
+          .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+          .map((block: any) => block.text)
+          .join("")
+          .trim();
+        if (output) return output;
+      } catch {
+        // An unavailable or unauthorised translator is not fatal: try the next one.
+      }
+    }
+    return null;
+  } finally {
+    translating = false;
+  }
+}
+
+async function translateText(ctx: TranslatorContext, text: string): Promise<string | null> {
+  const cached = translationCache.get(text);
+  if (cached) {
+    // Keep warm entries alive under FIFO eviction.
+    translationCache.delete(text);
+    translationCache.set(text, cached);
+    return cached;
+  }
+  if (!text || text.length > MAX_TRANSLATE_CHARS) return null;
+  // One trigger for the whole turn: a single Indonesian segment is enough.
+  if (!INDONESIAN_RE.test(text)) return null;
+
+  const parts: string[] = [];
+  for (const part of textSegments(text)) {
+    if (part.code || !part.value.trim()) {
+      parts.push(part.value);
+      continue;
+    }
+    // Whitespace framing the prose carries the layout (blank lines, the newline
+    // before a fence); only the words themselves are sent to the translator.
+    const leading = /^\s*/.exec(part.value)![0];
+    const trailing = /\s*$/.exec(part.value)![0];
+    const core = part.value.slice(leading.length, part.value.length - trailing.length);
+    const output = await callTranslator(ctx, core);
+    // Partial translation would corrupt the turn; either all of it or none.
+    if (!output) return null;
+    parts.push(`${leading}${output}${trailing}`);
+  }
+
+  const result = parts.join("");
+  cacheTranslation(text, result);
+  return result;
+}
+
+/**
+ * Bounded, in-memory, per-process cache — nothing is written to disk. A Map
+ * keeps insertion order, so when it is full the single oldest entry is dropped
+ * instead of clearing the whole cache (which would lose every warm hit).
+ * Worst case: MAX_TRANSLATION_CACHE entries x MAX_TRANSLATE_CHARS x 2.
+ */
+function cacheTranslation(original: string, translated: string): void {
+  if (translationCache.size >= MAX_TRANSLATION_CACHE) {
+    const oldest = translationCache.keys().next().value;
+    if (oldest !== undefined) translationCache.delete(oldest);
+  }
+  translationCache.set(original, translated);
+}
+
+function newestPromptTurn(messages: unknown[]): Record<string, unknown> | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!isRecord(msg) || msg.role !== "user") continue;
+    if (Array.isArray(msg.content)) {
+      const head = msg.content[0];
+      if (isRecord(head) && head.type === "tool_result") continue;
+    }
+    return msg;
+  }
+  return undefined;
+}
+
+function firstTextOf(msg: Record<string, unknown>): string | undefined {
+  if (typeof msg.content === "string") return msg.content;
+  if (!Array.isArray(msg.content)) return undefined;
+  for (const block of msg.content) {
+    if (isRecord(block) && isTextBlock(block) && typeof block.text === "string") return block.text;
+  }
+  return undefined;
+}
+
+function replaceFirstText(msg: Record<string, unknown>, text: string): void {
+  if (typeof msg.content === "string") {
+    msg.content = text;
+    return;
+  }
+  if (!Array.isArray(msg.content)) return;
+  for (const block of msg.content) {
+    if (isRecord(block) && isTextBlock(block) && typeof block.text === "string") {
+      block.text = text;
+      return;
+    }
+  }
+}
+
+async function applyTranslation(payload: Record<string, unknown>, ctx: TranslatorContext): Promise<void> {
+  translatedNow = new Set<string>();
+  if (!TRANSLATE_ENABLED) return;
+  const messages = Array.isArray(payload.messages) ? payload.messages : payload.input;
+  if (!Array.isArray(messages) || messages.length === 0) return;
+
+  const newest = newestPromptTurn(messages);
+  const newestFingerprint = newest ? fingerprintOf(newest) : "";
+  if (newestFingerprint !== lastPromptFingerprint) {
+    lastPromptFingerprint = newestFingerprint;
+    translateTried = false;
+  }
+
+  if (translatePending && newest) {
+    translatePending = false;
+    translateTried = true;
+    const original = firstTextOf(newest);
+    if (original) {
+      const english = await translateText(ctx, original);
+      if (english && english !== original) translatedTurns.add(newestFingerprint);
+    }
+  }
+
+  // Sticky: keep earlier translated turns translated, otherwise their original
+  // Indonesian text comes back with the next request and blocks it again.
+  if (translatedTurns.size === 0) return;
+  for (const msg of messages) {
+    if (!isRecord(msg) || msg.role !== "user") continue;
+    if (!translatedTurns.has(fingerprintOf(msg))) continue;
+    const original = firstTextOf(msg);
+    const english = original ? translationCache.get(original) : undefined;
+    if (!english) continue;
+    replaceFirstText(msg, english);
+    translatedNow.add(fingerprintOf(msg));
+  }
+}
+
+/**
+ * Mark the error as retryable so pi auto-restarts the turn: pi's retry
+ * classifier (pi-ai isRetryableAssistantError) matches "provider returned
+ * error". Each retry re-enters before_provider_request, which escalates the
+ * redaction (or applies the translation) until the language-ratio WAF passes.
+ */
+function retryableMessage(message: Record<string, unknown>, errorMessage: string) {
+  return {
+    message: {
+      ...message,
+      errorMessage: `${errorMessage} (provider returned error — retrying after local payload recovery)`,
+    },
+  };
+}
+
 function patchAgentRouterPayload(payload: unknown): void {
   if (!isRecord(payload)) return;
 
@@ -380,7 +644,7 @@ function patchAgentRouterPayload(payload: unknown): void {
   if (payload.instructions !== undefined) {
     payload.instructions = enforceCanonicalRootPrompt(payload.instructions, textType);
   }
-  if (typeof payload.input === "string") payload.input = prependUserPreamble(payload.input, textType);
+  if (typeof payload.input === "string") payload.input = prependUserPreamble(payload.input, LANGUAGE_PREAMBLE, textType);
   const messages = Array.isArray(payload.messages) ? payload.messages : payload.input;
   if (!Array.isArray(messages) || messages.length === 0) return;
 
@@ -586,8 +850,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Clone message trees, including nested tool calls, before sanitizing/redacting.
-  pi.on("before_provider_request", (event, ctx) => {
-
+  pi.on("before_provider_request", async (event, ctx) => {
     if (!event.payload) return;
     const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
@@ -597,6 +860,10 @@ export default function (pi: ExtensionAPI) {
     if (Array.isArray(payload.system)) payload.system = structuredClone(payload.system);
     sanitizeInPlace(payload);
     applyPoisonRedaction(payload);
+    // Runs after redaction (the redacted turn is gone, so there is nothing to
+    // translate there) and before framing, so the translated text is what gets
+    // framed — and framed with the reply-in-Indonesian preamble variant.
+    await applyTranslation(payload, ctx as TranslatorContext);
     patchAgentRouterPayload(payload);
   });
 
@@ -617,6 +884,21 @@ export default function (pi: ExtensionAPI) {
       isSensitiveBlock = true;
     }
     if (exhausted) {
+      // Nothing left to hide, so the newest turn is the trigger. Redaction of
+      // the newest turn would delete the user's actual request, so translate it
+      // instead: same meaning, English surface — which is what the WAF gates on.
+      if (TRANSLATE_ENABLED && !translateTried && translatorCandidates(ctx as TranslatorContext).length > 0) {
+        translatePending = true;
+        if (!wafNotified) {
+          wafNotified = true;
+          ctx.ui.notify(
+            "AgentRouter content filter blocked the request. Translating your latest message to English " +
+              "and retrying automatically (your session text stays untouched).",
+            "warning",
+          );
+        }
+        return retryableMessage(message, errorMessage);
+      }
       if (!wafNotified) {
         wafNotified = true;
         ctx.ui.notify(
@@ -634,15 +916,6 @@ export default function (pi: ExtensionAPI) {
         : "AgentRouter content filter blocked the request. Retrying automatically with earlier messages hidden.";
       ctx.ui.notify(note, "warning");
     }
-    // Mark the error as retryable so pi auto-restarts the turn: pi's retry
-    // classifier (pi-ai isRetryableAssistantError) matches "provider returned
-    // error". Each retry re-enters before_provider_request, which escalates
-    // the redaction by one more message until the language-ratio WAF passes.
-    return {
-      message: {
-        ...message,
-        errorMessage: `${errorMessage} (provider returned error — retrying with earlier messages hidden)`,
-      },
-    };
+    return retryableMessage(message, errorMessage);
   });
 }

@@ -17,7 +17,7 @@ Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent
 
 - **Per-model protocol routing:** GPT-6 Astra uses OpenAI Responses, Claude models use Anthropic Messages, and the rest use OpenAI Completions — all under one `agentrouter/` provider.
 - **WAF header & language guard:** forces Pi's canonical system header to byte 0 (prevents `400 content-blocked` when custom instructions precede it) and applies language framing on user turns.
-- **Self-healing WAF redaction:** when AgentRouter's content filter false-positives on multilingual histories, older turns are redacted in two stages and the turn is marked retryable — the latest request is preserved without user disruption.
+- **Self-healing WAF recovery:** when AgentRouter's content filter false-positives on multilingual histories, older turns are redacted in two stages and the turn is marked retryable — and when the newest turn itself is the trigger, it is translated to English instead of being dropped. The latest request survives without user disruption.
 - **Payload sanitization:** strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
 - **Prompt cache affinity:** injects `sendSessionAffinityHeaders: true` by default to maximize server-side cache hits.
 
@@ -58,7 +58,10 @@ Pick any model with `/model` (e.g. `agentrouter/gpt-5.6-sol`).
 1. The extension forces Pi's system prompt header to the very start of the payload.
 2. On a `content-blocked` / sensitive-words error, it marks the error retryable so Pi restarts the turn automatically.
 3. Stage 1 redacts older user turns (`[Message withheld by local policy]`); Stage 2 escalates to assistant turns if needed, keeping tool pairs intact.
-4. Redaction depth resets on new conversations or compaction.
+4. Stage 3 translates the newest turn: when there is nothing older left to redact, that turn is the trigger, and removing it would delete the user's actual request. It is translated to English instead — same meaning, English surface, which is what the language-ratio filter gates on. Fenced code and the session's own text are never touched.
+5. Redaction depth resets on new conversations or compaction.
+
+The translator is a cheap model from another configured provider (`ctx.modelRegistry`), picked automatically (flash/lite models from your own OAuth providers first). AgentRouter itself can never be the translator — it would block the Indonesian text handed to it. Override with `AGENTROUTER_TRANSLATOR="provider/modelId"`, disable with `AGENTROUTER_TRANSLATE=0`. Translations are cached in memory (bounded, FIFO eviction) and nothing is written to disk.
 
 </details>
 
@@ -79,7 +82,7 @@ bun ./check-framing.ts
 npm test
 ```
 
-Covers Responses text/image framing, empty content, function-call/result pairing, reasoning items, sticky WAF redaction, and Chat Completions/Anthropic compatibility.
+Covers Responses text/image framing, empty content, function-call/result pairing, reasoning items, sticky WAF redaction, on-demand translation (trigger, cache, give-up, code-fence fidelity), and Chat Completions/Anthropic compatibility.
 
 ## License
 
