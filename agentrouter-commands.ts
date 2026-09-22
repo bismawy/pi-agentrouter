@@ -924,6 +924,32 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
         return;
       }
       if (sub === "") {
+        if (ctx.hasUI) {
+          const options = [
+            "Status  ·  Live per-model quota, pricing, and endpoint",
+            "Usage   ·  Monthly billing total and per-model cost",
+          ];
+          const choice = await ctx.ui.select("pi-agentrouter · Menu", options);
+          if (!choice) return;
+          if (choice === options[0]) {
+            const report = await buildStatusReport(readApiKey());
+            if (ctx.mode === "tui") {
+              await showStatusPanel(ctx, report);
+              return;
+            }
+            ctx.ui.notify(renderStatusText(report), "info");
+            return;
+          }
+          if (choice === options[1]) {
+            const report = await buildUsageReport(readApiKey());
+            if (ctx.mode === "tui") {
+              await showUsagePanel(ctx, report);
+              return;
+            }
+            ctx.ui.notify(renderUsageText(report), "info");
+            return;
+          }
+        }
         const theme = ctx.ui.theme;
         const msg = [
           theme.fg("accent", theme.bold("pi-agentrouter"))

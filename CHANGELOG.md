@@ -13,6 +13,7 @@ All notable changes to this package. Releases older than 1.2.2 predate this file
 
 ### Added
 
+- Interactive TUI menu for bare `/agentrouter` command (`pi-agentrouter · Menu`) with options for Status and Usage.
 - Interactive TUI panels for `/agentrouter status` and `/agentrouter usage` matching the `/vision-watcher` design:
   - `DynamicBorder` framing in theme `accent`.
   - Contextual colors for model states (`ready` in green `success`, quota limits in `warning`, HTTP 5xx in `error`).
