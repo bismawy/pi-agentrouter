@@ -2,6 +2,15 @@
 
 All notable changes to this package. Releases older than 1.2.2 predate this file — see the git history and tags for details.
 
+## 1.6.0 — 2026-09-22
+
+### Changed — **breaking**
+
+- The two account commands are now one command with subcommands, matching the `/jev-eye status|login` pattern:
+  - `/agentrouter-status` → `/agentrouter status`
+  - `/agentrouter-usage` → `/agentrouter usage`
+  Argument completion covers both subcommands.
+
 ## 1.5.0 — 2026-09-22
 
 ### Added
