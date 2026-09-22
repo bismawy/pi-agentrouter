@@ -2,9 +2,9 @@
 
 # pi-agentrouter
 
-Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with WAF auto-recovery and payload sanitization.
+Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace, with self-healing WAF recovery (history redaction + on-demand translation) and payload sanitization.
 
-[pi package](https://pi.dev/packages/@bismawy/pi-agentrouter) · [npm](https://www.npmjs.com/package/@bismawy/pi-agentrouter) · [Issues](https://github.com/bismawy/pi-agentrouter/issues)
+[pi package](https://pi.dev/packages/@bismawy/pi-agentrouter) · [npm](https://www.npmjs.com/package/@bismawy/pi-agentrouter) · [Issues](https://github.com/bismawy/pi-agentrouter/issues) · [Changelog](./CHANGELOG.md)
 
 ![npm](https://img.shields.io/npm/v/@bismawy/pi-agentrouter)
 ![license](https://img.shields.io/badge/license-MIT-green)
