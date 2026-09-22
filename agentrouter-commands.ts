@@ -670,9 +670,28 @@ async function showStatusPanel(ctx: ExtensionCommandContext, report: StatusRepor
   });
 }
 
-async function buildUsageReport(apiKey: string | null): Promise<string> {
+interface UsageModelRow {
+  model: string;
+  usage: UsageTotals;
+  cost: number | null;
+}
+
+interface UsageReport {
+  month: string;
+  providerTotal: string;
+  providerTotalState: "ok" | "unavailable";
+  localFiles: number;
+  localRecords: number;
+  sinceDate: string;
+  rows: UsageModelRow[];
+  totalCost: number;
+  fullyPriced: boolean;
+}
+
+async function buildUsageReport(apiKey: string | null): Promise<UsageReport> {
   const now = new Date();
-  const lines: string[] = [`AgentRouter usage — ${monthLabel(now)}`, ""];
+  let providerTotal = "unavailable (no API key)";
+  let providerTotalState: "ok" | "unavailable" = "unavailable";
 
   if (apiKey) {
     const url = `${USAGE_URL}?start_date=${isoDate(new Date(now.getFullYear(), now.getMonth(), 1))}`
@@ -683,63 +702,193 @@ async function buildUsageReport(apiKey: string | null): Promise<string> {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       if (!res.ok) {
-        lines.push(`Provider total: unavailable (HTTP ${res.status})`);
+        providerTotal = `unavailable (HTTP ${res.status})`;
       } else {
         const payload = (await res.json()) as unknown;
         const cents = isRecord(payload) ? numOrNull(payload.total_usage) : null;
-        lines.push(cents === null
-          ? "Provider total: unavailable (unexpected payload)"
-          : `Provider total (billing API): ${usd(centsToUsd(cents))}`);
+        if (cents !== null) {
+          providerTotal = usd(centsToUsd(cents));
+          providerTotalState = "ok";
+        } else {
+          providerTotal = "unavailable (unexpected payload)";
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      lines.push(`Provider total: unavailable (${message})`);
+      providerTotal = `unavailable (${message})`;
     }
-  } else {
-    lines.push("Provider total: unavailable (no API key)");
   }
 
   const cached = readPricingCache();
   const prices = new Map(Object.entries(cached?.prices ?? {}));
   const scan = scanSessions(monthStartMs(now));
 
-  lines.push(`Local sessions: ${scan.files} file(s) since ${isoDate(new Date(monthStartMs(now)))}, ${scan.records} record(s)`);
-  lines.push("");
-  lines.push("MODEL               INPUT          OUTPUT         CACHE R/W          COST");
-  lines.push("-".repeat(78));
+  let totalCost = 0;
+  let fullyPriced = true;
+  const ranked = [...scan.byModel.entries()].sort(
+    (a, b) => (costOf(b[1], prices.get(b[0])) ?? 0) - (costOf(a[1], prices.get(a[0])) ?? 0),
+  );
 
-  let total = 0;
-  let priced = true;
-  const ranked = [...scan.byModel.entries()].sort((a, b) => (costOf(b[1], prices.get(b[0])) ?? 0) - (costOf(a[1], prices.get(a[0])) ?? 0));
-
+  const rows: UsageModelRow[] = [];
   for (const [model, usage] of ranked) {
     const cost = costOf(usage, prices.get(model));
-    if (cost === null) priced = false;
-    else total += cost;
-    lines.push(
-      model.padEnd(20)
-      + tokens(usage.input).padEnd(15)
-      + tokens(usage.output).padEnd(15)
-      + `${tokens(usage.cacheRead)}/${tokens(usage.cacheWrite)}`.padEnd(19)
-      + (cost === null ? "?" : usd(cost)),
-    );
+    if (cost === null) fullyPriced = false;
+    else totalCost += cost;
+    rows.push({ model, usage, cost });
   }
 
-  if (ranked.length === 0) {
+  return {
+    month: monthLabel(now),
+    providerTotal,
+    providerTotalState,
+    localFiles: scan.files,
+    localRecords: scan.records,
+    sinceDate: isoDate(new Date(monthStartMs(now))),
+    rows,
+    totalCost,
+    fullyPriced,
+  };
+}
+
+const USAGE_HEADERS = ["MODEL", "INPUT", "OUTPUT", "CACHE R/W", "COST"] as const;
+
+function usageColumnWidths(rows: UsageModelRow[]): number[] {
+  const cells = (row: UsageModelRow) => [
+    row.model,
+    tokens(row.usage.input),
+    tokens(row.usage.output),
+    `${tokens(row.usage.cacheRead)}/${tokens(row.usage.cacheWrite)}`,
+    row.cost !== null ? usd(row.cost) : "?",
+  ];
+  return USAGE_HEADERS.map((header, i) =>
+    Math.max(header.length, ...rows.map((row) => cells(row)[i].length)),
+  );
+}
+
+function renderUsageText(report: UsageReport): string {
+  const lines: string[] = [
+    `AgentRouter · Usage (${report.month})`,
+    `Provider billing total and local session breakdown.`,
+    "",
+    `Provider total: ${report.providerTotal}`,
+    `Local sessions: ${report.localFiles} file(s) since ${report.sinceDate}, ${report.localRecords} record(s)`,
+    "",
+  ];
+
+  if (report.rows.length === 0) {
     lines.push("(no AgentRouter usage recorded in local sessions this month)");
   } else {
-    lines.push("-".repeat(78));
-    lines.push("TOTAL".padEnd(69) + usd(total));
+    const widths = usageColumnWidths(report.rows);
+    lines.push(USAGE_HEADERS.map((h, i) => h.padEnd(widths[i]!)).join("  "));
+    for (const row of report.rows) {
+      lines.push(
+        [
+          row.model.padEnd(widths[0]!),
+          tokens(row.usage.input).padEnd(widths[1]!),
+          tokens(row.usage.output).padEnd(widths[2]!),
+          `${tokens(row.usage.cacheRead)}/${tokens(row.usage.cacheWrite)}`.padEnd(widths[3]!),
+          (row.cost !== null ? usd(row.cost) : "?").padEnd(widths[4]!),
+        ].join("  "),
+      );
+    }
+    lines.push("");
+    const sumW = widths.slice(0, 4).reduce((sum, w) => sum + w, 0) + 3 * 2;
+    lines.push("TOTAL".padEnd(sumW) + "  " + usd(report.totalCost));
   }
 
   lines.push("");
-  // Cache tokens are reported but not priced: AgentRouter publishes no cache rate,
-  // and inventing one would misstate the credits used.
-  lines.push("Costs are input/output tokens x live pricing; cache tokens are shown but");
-  lines.push(`not priced. Provider total is the authoritative monthly figure.`);
-  if (!priced) lines.push("Some models had no pricing entry — their cost is shown as ?.");
-
+  lines.push("Costs: input/output tokens x pricing. Cache tokens unpriced.");
   return lines.join("\n");
+}
+
+export function renderUsageBody(
+  report: UsageReport,
+  theme: Theme,
+  width: number,
+  clip: Clip,
+): string[] {
+  const pad = " ";
+  const fit = (line: string) => clip(pad + line, width);
+  const lines: string[] = [
+    fit(theme.fg("accent", theme.bold("AgentRouter")) + theme.fg("dim", " · ") + theme.fg("accent", theme.bold(`Usage (${report.month})`))),
+    fit(theme.fg("muted", "Provider billing total and local session breakdown.")),
+    "",
+  ];
+
+  if (report.rows.length === 0) {
+    lines.push(fit(theme.fg("muted", "(no AgentRouter usage recorded in local sessions this month)")), "");
+  } else {
+    const widths = usageColumnWidths(report.rows);
+    lines.push(fit(theme.fg("muted", theme.bold(USAGE_HEADERS.map((h, i) => h.padEnd(widths[i]!)).join("  ")))));
+    for (const row of report.rows) {
+      const costStr = row.cost !== null ? usd(row.cost) : "?";
+      lines.push(
+        fit(
+          theme.fg("accent", row.model.padEnd(widths[0]!))
+          + "  " + theme.fg("text", tokens(row.usage.input).padEnd(widths[1]!))
+          + "  " + theme.fg("text", tokens(row.usage.output).padEnd(widths[2]!))
+          + "  " + theme.fg("dim", `${tokens(row.usage.cacheRead)}/${tokens(row.usage.cacheWrite)}`.padEnd(widths[3]!))
+          + "  " + theme.fg(row.cost !== null ? "success" : "muted", costStr.padEnd(widths[4]!)),
+        ),
+      );
+    }
+    const sumW = widths.slice(0, 4).reduce((sum, w) => sum + w, 0) + 3 * 2;
+    lines.push(
+      fit(
+        theme.fg("muted", theme.bold("TOTAL".padEnd(sumW)))
+        + "  " + theme.fg("success", theme.bold(usd(report.totalCost))),
+      ),
+    );
+    lines.push("");
+  }
+
+  const footerLabel = (label: string, value: string, color: "success" | "warning" | "error" | "muted") =>
+    fit(theme.fg("dim", label.padEnd(16)) + theme.fg(color, value));
+
+  lines.push(footerLabel("Provider total", report.providerTotal, report.providerTotalState === "ok" ? "success" : "warning"));
+  lines.push(footerLabel("Local sessions", `${report.localFiles} files, ${report.localRecords} records (since ${report.sinceDate})`, "muted"));
+  lines.push("");
+
+  const count = report.rows.length ? `${report.rows.length} models` : "0 models";
+  lines.push(clip(" " + theme.fg("accent", count) + theme.fg("dim", " · [any key] close"), width));
+  return lines;
+}
+
+class AgentRouterUsagePanel implements Component {
+  private readonly report: UsageReport;
+  private readonly theme: Theme;
+  private readonly clip: Clip;
+
+  constructor(report: UsageReport, theme: Theme, clip: Clip) {
+    this.report = report;
+    this.theme = theme;
+    this.clip = clip;
+  }
+
+  render(width: number): string[] {
+    return renderUsageBody(this.report, this.theme, width, this.clip);
+  }
+
+  invalidate(): void {}
+}
+
+async function showUsagePanel(ctx: ExtensionCommandContext, report: UsageReport): Promise<void> {
+  const [{ DynamicBorder }, { Container, truncateToWidth }] = await Promise.all([
+    import("@earendil-works/pi-coding-agent"),
+    import("@earendil-works/pi-tui"),
+  ]);
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    const border = () => new DynamicBorder((s: string) => theme.fg("accent", s));
+    const container = new Container();
+    container.addChild(border());
+    container.addChild(new AgentRouterUsagePanel(report, theme, truncateToWidth));
+    container.addChild(border());
+    return {
+      render: (width: number) => container.render(width),
+      invalidate: () => container.invalidate(),
+      handleInput: () => done(),
+    };
+  });
 }
 
 const AGENTROUTER_SUBCOMMANDS: AutocompleteItem[] = [
@@ -766,7 +915,12 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
         return;
       }
       if (sub === "usage") {
-        ctx.ui.notify(await buildUsageReport(readApiKey()), "info");
+        const report = await buildUsageReport(readApiKey());
+        if (ctx.hasUI && ctx.mode === "tui") {
+          await showUsagePanel(ctx, report);
+          return;
+        }
+        ctx.ui.notify(renderUsageText(report), "info");
         return;
       }
       ctx.ui.notify(
