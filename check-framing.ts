@@ -38,11 +38,21 @@ assert.deepEqual(
 );
 // Dispatch check: bad input is rejected locally, without touching the network.
 const notices: string[] = [];
-const probeCtx = { ui: { notify: (message: string) => notices.push(message) } };
+const probeCtx = {
+  ui: {
+    notify: (message: string) => notices.push(message),
+    theme: {
+      fg: (_c: string, text: string) => text,
+      bold: (text: string) => text,
+    },
+  },
+};
 await commands.get("agentrouter")!.handler("bogus", probeCtx);
 assert.match(notices.at(-1)!, /Unknown argument "bogus"/);
 await commands.get("agentrouter")!.handler("", probeCtx);
-assert.match(notices.at(-1)!, /status \| \/agentrouter usage/);
+assert.match(notices.at(-1)!, /pi-agentrouter \| Menu:/);
+assert.match(notices.at(-1)!, /github\.com\/bismawy\/pi-agentrouter\/issues/);
+assert.match(notices.at(-1)!, /\$50 bonus/);
 
 // STATUS_PANEL_CHECK: the panel is a fixed-width table, so every line must fit the
 // width, colour must follow meaning, and a long provider error must be clipped.

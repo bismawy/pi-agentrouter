@@ -923,11 +923,29 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
         ctx.ui.notify(renderUsageText(report), "info");
         return;
       }
+      if (sub === "") {
+        const theme = ctx.ui.theme;
+        const msg = [
+          theme.fg("accent", theme.bold("pi-agentrouter"))
+            + theme.fg("dim", " | ")
+            + theme.fg("muted", "Menu: ")
+            + theme.fg("accent", "/agentrouter status")
+            + theme.fg("dim", " · ")
+            + theme.fg("accent", "/agentrouter usage"),
+          theme.fg("muted", "Found a bug? Report issues at ")
+            + theme.fg("accent", "https://github.com/bismawy/pi-agentrouter/issues")
+            + theme.fg("muted", "."),
+          theme.fg("muted", "New user? Register at ")
+            + theme.fg("accent", "https://agentrouter.org/register?aff=CKdn")
+            + " "
+            + theme.fg("success", "($50 bonus)"),
+        ].join("\n");
+        ctx.ui.notify(msg, "info");
+        return;
+      }
       ctx.ui.notify(
-        sub === ""
-          ? "[agentrouter] Use: /agentrouter status | /agentrouter usage"
-          : `[agentrouter] Unknown argument "${sub}". Use: status | usage.`,
-        sub === "" ? "info" : "warning"
+        `[agentrouter] Unknown argument "${sub}". Use: /agentrouter status | /agentrouter usage`,
+        "warning"
       );
     },
   });
