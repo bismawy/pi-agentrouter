@@ -6,10 +6,19 @@ All notable changes to this package. Releases older than 1.2.2 predate this file
 
 ### Changed — **breaking**
 
-- The two account commands are now one command with subcommands, matching the `/jev-eye status|login` pattern:
+- The two account commands are now one command with subcommands, matching the `/jev-eye` pattern:
   - `/agentrouter-status` → `/agentrouter status`
   - `/agentrouter-usage` → `/agentrouter usage`
   Argument completion covers both subcommands.
+
+### Added
+
+- Interactive TUI panels for `/agentrouter status` and `/agentrouter usage` matching the `/vision-watcher` design:
+  - `DynamicBorder` framing in theme `accent`.
+  - Contextual colors for model states (`ready` in green `success`, quota limits in `warning`, HTTP 5xx in `error`).
+  - Dynamic table column sizing with auto-truncation for long backend errors.
+  - Interactive legend footer (`[any key] close`) with fallback to plain-text formatting in non-TUI environments.
+- Default `/agentrouter` menu notice in English with direct links to issues and referral registration.
 
 ## 1.5.0 — 2026-09-22
 
