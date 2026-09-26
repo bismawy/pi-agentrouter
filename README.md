@@ -11,8 +11,6 @@ Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent
 
 </div>
 
-<img src="assets/screenshot.webp" alt="pi-agentrouter" width="100%">
-
 ## What it does
 
 - **Per-model protocol routing:** GPT-6 Astra uses OpenAI Responses, Claude models use Anthropic Messages, and the rest use OpenAI Completions — all under one `agentrouter/` provider.
