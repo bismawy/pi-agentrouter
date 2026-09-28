@@ -10,7 +10,7 @@ Unified frontier models. Self-healing WAF recovery. Zero workflow interruption.
 
 ## Overview
 
-pi-agentrouter provides a unified provider for [AgentRouter](https://agentrouter.org) in Pi — routing GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with self-healing WAF recovery.
+pi-agentrouter provides a unified provider for [AgentRouter](https://agentrouter.org/register?aff=CKdn) in Pi — routing GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with self-healing WAF recovery.
 
 - **Protocol Routing:** GPT-6 Astra routes via OpenAI Responses, Claude models via Anthropic Messages, and others via OpenAI Completions under one provider.
 - **WAF Header & Language Guard:** Forces Pi's canonical system header to byte 0 and applies language framing on user turns.
@@ -36,6 +36,8 @@ pi install npm:@bismawy/pi-agentrouter
 ```
 
 Supply your API key via `/login agentrouter`, `export AGENTROUTER_API_KEY="your-key"`, or in `~/.pi/agent/models.json`.
+
+> No account yet? [Register on AgentRouter](https://agentrouter.org/register?aff=CKdn) for a $50 bonus.
 
 To test locally without installing:
 ```bash

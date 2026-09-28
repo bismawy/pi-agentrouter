@@ -1,7 +1,7 @@
 /**
  * AgentRouter Provider Extension for pi
  *
- * Registers AgentRouter (https://agentrouter.org) as a single custom provider
+ * Registers AgentRouter (https://agentrouter.org/register?aff=CKdn) as a single custom provider
  * with GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3.
  * GPT-6 Astra uses openai-responses; Claude models use anthropic-messages;
  * the rest ride the provider-level openai-completions config.

@@ -11,6 +11,7 @@
 - Standardized README tagline (`Unified frontier models. Self-healing WAF recovery. Zero workflow interruption.`) and `package.json` description.
 - Standardized full-width responsive banner image (`assets/banner.webp`).
 - Registered `LICENSE` and `README.md` in `package.json` `"files"` packaging list.
+- Updated AgentRouter public links in README and extension docs to canonical referral registration URL (`https://agentrouter.org/register?aff=CKdn`).
 
 ---
 
