@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Added `"pi"` to package keywords in `package.json` for discoverability compliance.
+
+---
+
 ## [1.6.1] - 2026-09-28
 
 ### Added
