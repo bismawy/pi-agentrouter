@@ -1,36 +1,33 @@
-<div align="center">
+# AgentRouter
 
-# pi-agentrouter
+Unified frontier models. Self-healing WAF recovery. Zero workflow interruption.
 
-Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — routes GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace, with self-healing WAF recovery (history redaction + on-demand translation) and payload sanitization.
+[![Custom badge](https://shieldcn.dev/badge/pi-%20Packages.svg?variant=outline&size=xs&logo=ri%3APiPiBold)](https://pi.dev/packages/@bismawy/pi-agentrouter)
+[![badge](https://shieldcn.dev/npm/@bismawy/pi-agentrouter.svg?variant=outline&size=xs)](https://www.npmjs.com/package/@bismawy/pi-agentrouter)
+[![license](https://shieldcn.dev/github/bismawy/pi-agentrouter/license.svg?variant=outline&size=xs)](https://github.com/bismawy/pi-agentrouter)
 
-[pi package](https://pi.dev/packages/@bismawy/pi-agentrouter) · [npm](https://www.npmjs.com/package/@bismawy/pi-agentrouter) · [Issues](https://github.com/bismawy/pi-agentrouter/issues) · [Changelog](./CHANGELOG.md)
+<img src="https://raw.githubusercontent.com/bismawy/pi-agentrouter/main/assets/banner.webp" alt="AgentRouter: unified frontier models and self-healing WAF recovery for Pi" width="100%">
 
-![npm](https://img.shields.io/npm/v/@bismawy/pi-agentrouter)
-![license](https://img.shields.io/badge/license-MIT-green)
+## Overview
 
-</div>
+pi-agentrouter provides a unified provider for [AgentRouter](https://agentrouter.org) in Pi — routing GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8 / 5, DeepSeek V4 Flash, and GLM 5.3 under a single `agentrouter/` namespace with self-healing WAF recovery.
 
-## What it does
+- **Protocol Routing:** GPT-6 Astra routes via OpenAI Responses, Claude models via Anthropic Messages, and others via OpenAI Completions under one provider.
+- **WAF Header & Language Guard:** Forces Pi's canonical system header to byte 0 and applies language framing on user turns.
+- **Self-Healing Recovery:** Redacts older history turns in two stages on content-filter triggers, and automatically translates the latest turn to English when needed.
+- **Payload Sanitization:** Strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
+- **Session Affinity:** Injects `sendSessionAffinityHeaders: true` by default to maximize server-side cache hits.
 
-- **Per-model protocol routing:** GPT-6 Astra uses OpenAI Responses, Claude models use Anthropic Messages, and the rest use OpenAI Completions — all under one `agentrouter/` provider.
-- **WAF header & language guard:** forces Pi's canonical system header to byte 0 (prevents `400 content-blocked` when custom instructions precede it) and applies language framing on user turns.
-- **Self-healing WAF recovery:** when AgentRouter's content filter false-positives on multilingual histories, older turns are redacted in two stages and the turn is marked retryable — and when the newest turn itself is the trigger, it is translated to English instead of being dropped. The latest request survives without user disruption.
-- **Payload sanitization:** strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
-- **Prompt cache affinity:** injects `sendSessionAffinityHeaders: true` by default to maximize server-side cache hits.
-
-## Registered models
+## Registered Models
 
 | Model | Context | Input | Protocol | Thinking |
 | :--- | :--- | :--- | :--- | :--- |
-| `agentrouter/gpt-6-astra` | 272k* | text, image | OpenAI Responses | `low` – `xhigh` |
+| `agentrouter/gpt-6-astra` | 272k | text, image | OpenAI Responses | `low` – `xhigh` |
 | `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
 | `agentrouter/claude-opus-5` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
 | `agentrouter/claude-opus-4-8` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
 | `agentrouter/deepseek-v4-flash` | 131k | text | OpenAI Completions | `low` – `xhigh` |
 | `agentrouter/glm-5.3` | 131k | text | OpenAI Completions | `low` – `xhigh` |
-
-*Astra currently reuses Sol's configured 272,000-token context and 16,384-token output limits; these are local defaults, not confirmed AgentRouter limits. Responses API is required for function tools with reasoning enabled. Existing models keep their original protocols.
 
 ## Install
 
@@ -38,54 +35,47 @@ Unified [AgentRouter](https://agentrouter.org) provider for the [pi coding agent
 pi install npm:@bismawy/pi-agentrouter
 ```
 
-Then supply your AgentRouter API key one of three ways:
+Supply your API key via `/login agentrouter`, `export AGENTROUTER_API_KEY="your-key"`, or in `~/.pi/agent/models.json`.
 
-- `/login agentrouter` in a Pi session
-- `export AGENTROUTER_API_KEY="your-api-key"`
-- `providers.agentrouter.apiKey` in `~/.pi/agent/models.json`
-
-> No account yet? [Register via AgentRouter (referral)](https://agentrouter.org/register?aff=CKdn) for a $50 bonus.
-
-Pick any model with `/model` (e.g. `agentrouter/gpt-5.6-sol`).
-
-## How it works
-
-<details>
-<summary><b>WAF auto-recovery lifecycle</b></summary>
-
-1. The extension forces Pi's system prompt header to the very start of the payload.
-2. On a `content-blocked` / sensitive-words error, it marks the error retryable so Pi restarts the turn automatically.
-3. Stage 1 redacts older user turns (`[Message withheld by local policy]`); Stage 2 escalates to assistant turns if needed, keeping tool pairs intact.
-4. Stage 3 translates the newest turn: when there is nothing older left to redact, that turn is the trigger, and removing it would delete the user's actual request. It is translated to English instead — same meaning, English surface, which is what the language-ratio filter gates on. Fenced code and the session's own text are never touched.
-5. Redaction depth resets on new conversations or compaction.
-
-The translator is a cheap model from another configured provider (`ctx.modelRegistry`), picked automatically (flash/lite models from your own OAuth providers first). AgentRouter itself can never be the translator — it would block the Indonesian text handed to it. Override with `AGENTROUTER_TRANSLATOR="provider/modelId"`, disable with `AGENTROUTER_TRANSLATE=0`. Translations are cached in memory (bounded, FIFO eviction) and nothing is written to disk.
-
-</details>
-
-<details>
-<summary><b>Capability boundaries</b></summary>
-
-Text-only models (`deepseek-v4-flash`, `glm-5.3`) are declared `input: ["text"]` so image payloads from earlier turns don't produce AgentRouter 400 errors.
-
-</details>
-
-## Development
-
-Run the regression check against the actual registered extension hooks (no API key or network required):
-
+To test locally without installing:
 ```bash
-bun ./check-framing.ts
-# Or Node.js 22.18+:
-npm test
+pi -e ./index.ts
 ```
 
-Covers Responses text/image framing, empty content, function-call/result pairing, reasoning items, sticky WAF redaction, on-demand translation (trigger, cache, give-up, code-fence fidelity), and Chat Completions/Anthropic compatibility.
+## Commands
+
+| Command | Action |
+| :--- | :--- |
+| `/agentrouter` | Interactive menu with Status and Usage panels |
+| `/agentrouter status` | View active models, status, and balance in a styled TUI panel |
+| `/agentrouter usage` | Inspect session usage metrics and cost estimates |
+
+## Architecture
+
+<details>
+<summary><b>WAF Auto-Recovery Lifecycle</b></summary>
+
+1. Forces Pi's system prompt header to the very start of the payload.
+2. On `content-blocked` or sensitive-words errors, marks the turn retryable for automatic recovery.
+3. Stage 1 redacts older user turns; Stage 2 escalates to assistant turns while preserving tool pairs.
+4. Stage 3 translates the newest turn to English if redaction is exhausted, avoiding user turn deletion.
+5. Redaction depth resets on new conversations or compaction.
+
+</details>
+
+<details>
+<summary><b>Development</b></summary>
+
+```bash
+npm test # Runs check-framing.ts self-checks
+```
+
+</details>
 
 ## License
 
 Distributed under the **MIT** license.
 
-## Developer
+## Author
 
-Developed and maintained by [Bisma](https://github.com/bismawy).
+[Bisma](https://github.com/bismawy)

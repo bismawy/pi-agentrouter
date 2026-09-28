@@ -1,15 +1,17 @@
 {
   "name": "@bismawy/pi-agentrouter",
   "version": "1.6.1",
-  "description": "AgentRouter provider for pi — GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8/5, DeepSeek V4 Flash and GLM 5.3 under one namespace, with self-healing WAF recovery (history redaction + auto-translation)",
+  "description": "AgentRouter provider for Pi: access frontier models under one namespace with self-healing WAF recovery and automatic turn translation.",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "pi",
     "pi-coding-agent",
     "agentrouter",
-    "provider"
+    "provider",
+    "model-provider",
+    "waf-recovery",
+    "llm-router"
   ],
   "author": "bismawy",
   "license": "MIT",
@@ -19,18 +21,21 @@
   "files": [
     "index.ts",
     "agentrouter-commands.ts",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/bismawy/pi-agentrouter/main/assets/screenshot.webp"
+    "image": "https://raw.githubusercontent.com/bismawy/pi-agentrouter/main/assets/banner.webp"
   },
   "imports": {
     "#extension": "./index.ts"
   },
   "scripts": {
+    "dev": "pi -e ./index.ts",
     "test": "node ./check-framing.ts"
   },
   "peerDependencies": {
