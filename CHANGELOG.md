@@ -3,7 +3,7 @@
 ## [1.6.2] - 2026-09-30
 
 ### Fixed
-- Fixed missing banner on pi.dev package page by syncing manifest `image` property to `assets/banner.webp` and adding `assets/screenshot.webp` compatibility fallback.
+- Fixed missing banner on pi.dev package page by syncing manifest `image` property to `assets/banner.webp`.
 
 ### Changed
 - Added `"pi"` to package keywords in `package.json` for discoverability compliance.
