@@ -1,6 +1,6 @@
 {
   "name": "@bismawy/pi-agentrouter",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "AgentRouter provider for Pi: access frontier models under one namespace with self-healing WAF recovery and automatic turn translation.",
   "type": "module",
   "keywords": [
