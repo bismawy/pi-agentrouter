@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `package.json` `description` now leads with the README tagline ("Unified frontier models. Self-healing WAF recovery. Zero workflow interruption.") followed by the capability summary, per the `/arnative-pi` manifest standard — pi.dev/packages renders this field verbatim as the package card description.
+
 ## [1.6.2] - 2026-09-30
 
 ### Fixed
