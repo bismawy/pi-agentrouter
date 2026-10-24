@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import register, { MODEL_BLUEPRINTS, blueprintFor } from "./index.ts";
-import { AGENTROUTER_PROBE_TARGETS, renderStatusBody, renderUsageBody } from "./agentrouter-commands.ts";
+import { AGENTROUTER_PROBE_TARGETS, AgentRouterMenu, boxFrame, packPairs, renderStatusBody, renderUsageBody, statusRow, visibleWidth } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
 type Wire = Record<string, any>;
@@ -54,8 +54,8 @@ assert.match(notices.at(-1)!, /pi-agentrouter \| Menu:/);
 assert.match(notices.at(-1)!, /github\.com\/bismawy\/pi-agentrouter\/issues/);
 assert.match(notices.at(-1)!, /\$50 bonus/);
 
-// STATUS_PANEL_CHECK: the panel is a fixed-width table, so every line must fit the
-// width, colour must follow meaning, and a long provider error must be clipped.
+// PANEL_CHECK (arnative box): every line is exactly the width (the frame pads), the rounded
+// corners open and close the box, colour follows meaning, and a long provider error is clipped.
 type Report = Parameters<typeof renderStatusBody>[0];
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const colorsUsed = new Set<string>();
@@ -98,15 +98,27 @@ const plainClip = (text: string, width: number) => {
 const renderPanel = (width: number) => renderStatusBody(statusPanel, fakeTheme, width, plainClip).map(stripAnsi);
 
 for (const width of [140, 60, 40]) {
-  const overflow = renderPanel(width).find((line) => displayWidth(line) > width);
-  assert.equal(overflow, undefined, `panel line overflows ${width}: ${overflow}`);
-  assert.ok(renderPanel(width).some((line) => line.includes("glm-5.3")), `model row missing at width ${width}`);
+  const lines = renderPanel(width);
+  // Frame intact: rounded top and bottom edges, walls on every row, every line exactly the width.
+  assert.ok(lines[0]!.startsWith("╭") && lines[0]!.endsWith("╮"), `top edge broken at ${width}`);
+  assert.ok(lines.at(-1)!.startsWith("╰") && lines.at(-1)!.endsWith("╯"), `bottom edge broken at ${width}`);
+  for (const line of lines.slice(1, -1)) {
+    assert.ok(line.startsWith("│") && line.endsWith("│"), `wall missing at ${width}: ${line}`);
+  }
+  const badWidth = lines.find((line) => displayWidth(line) !== width);
+  assert.equal(badWidth, undefined, `panel line is not exactly ${width} wide: ${badWidth}`);
+  assert.ok(lines.some((line) => line.includes("glm-5.3")), `model row missing at width ${width}`);
 }
-// A wide panel shows the status column in full; only the long error is clipped.
+// Status rows: `Label · STATUS | detail`, label padded so every divider sits in one column.
 const wide = renderPanel(140);
-assert.ok(wide.some((line) => line.trimEnd().endsWith("ready")), "ready row must not be clipped at full width");
+assert.ok(wide.some((line) => line.includes("READY")), "ready row must show its status word at full width");
 assert.ok(wide.some((line) => line.includes("quota exhausted (402)")), "short statuses must survive at full width");
-assert.ok(renderPanel(60).some((line) => line.endsWith("…")), "long error detail must be clipped");
+const dividerColumns = new Set(
+  wide.filter((line) => line.includes("glm-5.3") || line.includes("gpt-6-astra") || line.includes("claude-opus-5"))
+    .map((line) => line.indexOf("·")),
+);
+assert.equal(dividerColumns.size, 1, `model-row dividers must share one column: ${[...dividerColumns]}`);
+assert.ok(renderPanel(60).some((line) => line.includes("…")), "long error detail must be clipped");
 for (const color of ["accent", "dim", "muted", "success", "warning", "error"]) {
   assert.ok(colorsUsed.has(color), `panel never uses the "${color}" theme colour`);
 }
@@ -117,8 +129,12 @@ const keyMissing = renderStatusBody(
   plainClip,
 ).map(stripAnsi).join("\n");
 assert.match(keyMissing, /no API key/);
+// A theme with no colours at all renders uncoloured instead of throwing.
+const nullTheme = { fg: (_c: string, text: string) => text, bold: (text: string) => text } as unknown as Parameters<typeof renderStatusBody>[1];
+const uncoloured = renderStatusBody(statusPanel, nullTheme, 80, plainClip).join("\n");
+assert.ok(!/\x1b\[/.test(uncoloured), "identity theme must render without escapes");
 
-// USAGE_PANEL_CHECK: usage report renders cleanly with identical theme framing
+// USAGE_PANEL_CHECK: usage report renders in the same frame with identical rules
 type UsageRep = Parameters<typeof renderUsageBody>[0];
 const sampleUsage: UsageRep = {
   month: "September 2026",
@@ -140,9 +156,55 @@ const sampleUsage: UsageRep = {
 
 for (const width of [120, 60, 45]) {
   const lines = renderUsageBody(sampleUsage, fakeTheme, width, plainClip).map(stripAnsi);
-  const overflow = lines.find((line) => displayWidth(line) > width);
-  assert.equal(overflow, undefined, `usage line overflows ${width}: ${overflow}`);
+  const overflow = lines.find((line) => displayWidth(line) !== width);
+  assert.equal(overflow, undefined, `usage line is not exactly ${width} wide: ${overflow}`);
+  assert.ok(lines[0]!.startsWith("╭") && lines.at(-1)!.endsWith("╯"), `usage frame broken at ${width}`);
   assert.ok(lines.some((l) => l.includes("claude-opus-5")), "model row missing in usage panel");
+}
+assert.ok(renderUsageBody(sampleUsage, fakeTheme, 120, plainClip).map(stripAnsi).some((l) => l.includes("$12.45")), "provider total shown");
+
+// BOX_HELPER_CHECK: the pure chrome layer — widths, wrapping, degenerate frames, row layout.
+assert.equal(visibleWidth("\x1b[31mab\x1b[0m"), 2, "ANSI escapes occupy no columns");
+assert.equal(visibleWidth("当前"), 4, "wide glyphs count two columns each");
+assert.deepEqual(
+  boxFrame(["hi"], 8).map((l) => displayWidth(l)),
+  [8, 8, 8],
+  "boxFrame pads every row to exactly the width",
+);
+assert.equal(boxFrame(["hi"], 3)[1], "", "rows below four columns degenerate instead of overflowing");
+assert.deepEqual(statusRow("Gate", "READY", ["a", false, "b"]), "Gate          · READY | a · b", "status row pads the label and keeps the divider column");
+assert.deepEqual(packPairs(["[↑↓] Move", "[Enter] Choose", "[Esc] Cancel"], 12), ["[↑↓] Move", "[Enter] Choose", "[Esc] Cancel"], "a pair is never split across rows");
+
+// MENU_CHECK: the rounded root menu — one chosen row with the `→` marker, padded labels,
+// dim legend, and no `[←] Back` on the root.
+{
+  const menuKeys = { matches: (data: string, key: string) => data === key, up: "up", down: "down", home: "home", end: "end", enter: "enter", escape: "escape" } as const;
+  const outcomes: (string | null)[] = [];
+  const menu = new AgentRouterMenu(
+    fakeTheme as unknown as ConstructorParameters<typeof AgentRouterMenu>[0],
+    [
+      { key: "status", label: "Status", note: "Live per-model quota, pricing, and endpoint" },
+      { key: "usage", label: "Usage", note: "Monthly billing total and per-model cost" },
+    ],
+    plainClip,
+    menuKeys,
+    (key) => outcomes.push(key),
+    (text: string) => text,
+  );
+  const rendered = menu.render(60).map(stripAnsi);
+  assert.ok(rendered[0]!.startsWith("╭") && rendered.at(-1)!.endsWith("╯"), "menu frame broken");
+  const badWidth = rendered.find((line) => displayWidth(line) !== 60);
+  assert.equal(badWidth, undefined, `menu line is not exactly 60 wide: ${badWidth}`);
+  assert.equal(rendered.filter((line) => line.includes("→ ")).length, 1, "exactly one chosen row carries the marker");
+  assert.ok(rendered.some((line) => line.includes("[↑↓] Move  [Enter] Choose  [Esc] Cancel")), "legend must follow the arnative order");
+  assert.ok(!rendered.some((line) => line.includes("[←]")), "the root menu carries no Back key");
+  const dividers = new Set(rendered.filter((line) => line.includes("Status") || line.includes("Usage")).map((line) => line.indexOf("·")));
+  assert.equal(dividers.size, 1, `menu dividers must share one column: ${[...dividers]}`);
+  menu.handleInput("down");
+  assert.ok(menu.render(60).some((line) => line.includes("→ Usage")), "down arrow moves the marker");
+  menu.handleInput("enter");
+  menu.handleInput("escape");
+  assert.deepEqual(outcomes, ["usage", null], "enter chooses and escape cancels");
 }
 assert.ok(renderUsageBody(sampleUsage, fakeTheme, 100, plainClip).map(stripAnsi).some((l) => l.includes("$12.45")), "provider total shown");
 const registered = new Map<string, { api: string; baseUrl: string }>(

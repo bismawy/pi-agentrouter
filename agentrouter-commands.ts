@@ -16,7 +16,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -509,6 +509,183 @@ async function buildStatusReport(apiKey: string | null, targets: readonly ProbeT
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * Arnative box chrome (pure: the theme is handed in as a loose structural object, so
+ * the self-check runs under plain node with no pi-tui). Same glyphs, colours, and
+ * layout rules as @bismawy/pi-arnative lib/box.ts and pi-jev-eye layer1.ts.
+ * ------------------------------------------------------------------ */
+
+/** Theme slot for a thinking level. Every pi theme defines one `thinking*` token, so a built-in
+ *  theme still gets a coloured frame when it has no soft accent to derive. */
+function thinkingColorSlot(level: string | undefined): string {
+  switch ((level ?? "off").toLowerCase()) {
+    case "minimal": return "thinkingMinimal";
+    case "low": return "thinkingLow";
+    case "medium": return "thinkingMedium";
+    case "high": return "thinkingHigh";
+    case "xhigh": return "thinkingXhigh";
+    case "max": return "thinkingMax";
+    default: return "thinkingOff";
+  }
+}
+
+type StatusPainter = (token: string, text: string) => string;
+
+/** One status row: `Label · STATUS | detail · detail`. The label is padded to `column` so every
+ *  `·` divider lands in the same column, exactly like the list menus; the status word carries its
+ *  own token, so a glance down the left column answers "is it on?" without reading the details. */
+export function statusRow(
+  label: string,
+  status: string,
+  details: (string | false | undefined)[],
+  paint: StatusPainter = (_token, text) => text,
+  statusToken = "muted",
+  column = 14,
+): string {
+  const divider = paint("dim", "·");
+  // The widest label itself keeps one space before its divider; padEnd alone would glue the two.
+  const head = `${paint("dim", label.padEnd(Math.max(label.length + 1, column)))}${divider} `;
+  const body = details.filter(Boolean).join(paint("dim", " · "));
+  const tail = body ? `${paint("dim", "|")} ${body}` : "";
+  return `${head}${paint(statusToken, status)}${tail ? ` ${tail}` : ""}`;
+}
+
+type BoxTheme = {
+  fg(color: string, text: string): string;
+  /** pi 1.2.0's `Theme.style`; paints a colour that is not one of the fixed tokens. `any` options:
+   *  the structural param must stay bivariant so pi's own `Theme` satisfies this type. */
+  style?(text: string, options: any): string;
+  bold?(text: string): string;
+  /** Resolved token values, so a soft tier can be derived from the official token it maps to. */
+  colors?: Record<string, { kind?: string; c?: number; h?: number }>;
+};
+
+/**
+ * The arnative soft tier, derived. Pi <=1.1.0 let a theme declare extra keys in `colors`, so
+ * `fg("accentSoft")` worked; 1.2.0 validates `colors` with `additionalProperties: false` and
+ * `fg("accentSoft")` now throws. Falling back to a different official token would silently change
+ * the colour, so the soft tier is computed from the resolved token with the theme generator's
+ * exact recipe (L 0.82, chroma x 0.18, hue kept) — the very value arnative declares in `vars.*Soft`.
+ */
+const SOFT_L = 0.82;
+const SOFT_CHROMA_SCALE = 0.18;
+const softenColor = (color: { c?: number; h?: number }): { kind: "oklch"; l: number; c: number; h: number } => ({
+  kind: "oklch",
+  l: SOFT_L,
+  c: (color.c ?? 0) * SOFT_CHROMA_SCALE,
+  h: color.h ?? 0,
+});
+
+/** The first token of `tokens` the theme actually defines; every `theme.fg` throws on an unknown one. */
+function firstToken(fg: (color: string, text: string) => string, tokens: string[]): string | undefined {
+  return tokens.find((token) => {
+    try {
+      fg(token, "");
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+const tokenPainter = (theme: BoxTheme | null | undefined, tokens: string[]): ((text: string) => string) | undefined => {
+  const fg = theme?.fg?.bind(theme);
+  const token = fg ? firstToken(fg, tokens) : undefined;
+  return token && fg ? (text) => fg(token, text) : undefined;
+};
+
+const softTierPainter = (theme: BoxTheme | null | undefined, baseToken: string): ((text: string) => string) | undefined => {
+  const base = theme?.colors?.[baseToken];
+  const style = theme?.style?.bind(theme) as ((text: string, options: { fg: unknown }) => string) | undefined;
+  if (base?.kind !== "oklch" || !style) return undefined;
+  return (text) => style(text, { fg: softenColor(base) });
+};
+
+/** Declared token first (pi <=1.1.0 unchanged), then the derivation, then the official fallbacks, then identity. */
+const softPainter = (
+  theme: BoxTheme | null | undefined,
+  direct: string[],
+  baseToken: string,
+  fallbacks: string[],
+): ((text: string) => string) =>
+  tokenPainter(theme, direct) ?? softTierPainter(theme, baseToken) ?? tokenPainter(theme, fallbacks) ?? ((text) => text);
+
+/** The box border: the arnative soft accent where the theme has it, otherwise the theme's
+ *  `borderAccent` softened, and only then the session's thinking slot; identity with no theme. */
+export function borderPainter(theme: BoxTheme | null | undefined, thinkingLevel?: string): (text: string) => string {
+  return softPainter(theme, ["accentSoft"], "borderAccent", [thinkingColorSlot(thinkingLevel), "accent"]);
+}
+
+/** A chosen row's body: the `→` marker keeps the accent, the text moves to the soft tint, bold. */
+export function chosenRowPainter(theme: BoxTheme | null | undefined): (text: string) => string {
+  const paint = softPainter(theme, ["accentSoft"], "accent", ["thinkingText", "accent"]);
+  const bold = theme?.bold?.bind(theme) ?? ((text: string) => text);
+  return (text) => paint(bold(text));
+}
+
+/** ANSI escape sequences (CSI, OSC, single-character) — they occupy no terminal columns. */
+const ANSI_ESCAPE = /\x1b(?:\[[0-9;:?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+
+/** Terminal columns of a styled string: strip ANSI, then count full-width glyphs as two. */
+export function visibleWidth(text: string): number {
+  const plain = text.replace(ANSI_ESCAPE, "");
+  let wide = 0;
+  for (const char of plain) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 0x1100 && (code <= 0x115f || code === 0x2329 || code === 0x232a || (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) || (code >= 0xac00 && code <= 0xd7a3) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xfe30 && code <= 0xfe6f) || (code >= 0xff00 && code <= 0xff60) || (code >= 0xffe0 && code <= 0xffe6) || (code >= 0x1f300 && code <= 0x1f64f) || (code >= 0x20000 && code <= 0x3fffd))) wide += 1;
+  }
+  return [...plain].length + wide;
+}
+
+/** `╭───╮` / `╰───╯`. Width holds at 1-2 because a line shorter than the frame beats a downshifted one. */
+export function boxEdge(left: string, right: string, width: number, paint: (text: string) => string = (text) => text): string {
+  return paint(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);
+}
+
+/** `│ text │` for one already-styled row. Below four columns a blank line beats an overflowing one. */
+export function boxRow(content: string, width: number, paint: (text: string) => string = (text) => text): string {
+  if (width < 4) return "";
+  return `${paint("│")} ${content}${" ".repeat(Math.max(0, width - visibleWidth(content) - 3))}${paint("│")}`;
+}
+
+/** Wrap already-styled rows in the rounded frame: one top edge, one row per line, one bottom edge. */
+export function boxFrame(rows: string[], width: number, paint: (text: string) => string = (text) => text): string[] {
+  return [boxEdge("╭", "╮", width, paint), ...rows.map((row) => boxRow(row, width, paint)), boxEdge("╰", "╯", width, paint)];
+}
+
+/** Content column of a framed row: the frame owns the two walls and the two spaces. */
+const boxInner = (width: number): number => Math.max(0, width - 4);
+
+/** Pack footer pairs into rows that fit `width` columns, two spaces between pairs and never inside one. */
+export function packPairs(pairs: string[], width: number): string[] {
+  const rows: string[] = [];
+  let row = "";
+  for (const pair of pairs) {
+    const candidate = row ? `${row}  ${pair}` : pair;
+    if (row && visibleWidth(candidate) > width) {
+      rows.push(row);
+      row = pair;
+      continue;
+    }
+    row = candidate;
+  }
+  if (row) rows.push(row);
+  return rows;
+}
+
+/**
+ * Frame whole rows into the arnative box: split on newlines first (a value from the network or a
+ * pasted query must not open a hole in the frame), clip each row to the inner width — the clip keeps
+ * an ellipsis, so a model id cut to `deepseek-v` must not read as a whole name — then add the walls.
+ */
+function frameRows(rows: string[], width: number, clip: Clip, paint: (text: string) => string): string[] {
+  return boxFrame(
+    rows.flatMap((content) => String(content).split("\n")).map((content) => clip(content, boxInner(width))),
+    width,
+    paint,
+  );
+}
+
 const STATUS_HEADERS = ["MODEL", "INPUT/1M", "OUTPUT/1M", "ENDPOINT", "STATUS"] as const;
 
 /** Column widths come from the data, so a short table stays tight and a long model id never overflows. */
@@ -569,11 +746,11 @@ function statusColor(state: StatusRow["state"]): "success" | "warning" | "error"
 type Clip = (text: string, width: number) => string;
 
 /**
- * The panel body: same data as renderStatusText, one colour per meaning.
+ * The framed status body: title with a muted description underneath, one `Label · STATUS | detail`
+ * row per model, a fixed footer block, and a dim key legend above the bottom edge.
  *
- * Clipping happens on plain text, never on a coloured line: escape sequences would
- * count towards the width and slice a column in half. Table rows are assembled from
- * cells already padded to their computed width, so their visible width is exact.
+ * Clipping happens inside frameRows, on each row after it is styled: the clip is ANSI-aware,
+ * so escape sequences never count towards the width and no column is sliced in half.
  */
 export function renderStatusBody(
   report: StatusReport,
@@ -581,100 +758,59 @@ export function renderStatusBody(
   width: number,
   clip: Clip,
 ): string[] {
-  const pad = " ";
-  const fit = (line: string) => clip(pad + line, width);
+  const paint: StatusPainter = (token, text) => theme.fg(token as never, text);
   const lines: string[] = [
-    fit(theme.fg("accent", theme.bold("AgentRouter")) + theme.fg("dim", " · ") + theme.fg("accent", theme.bold("Status"))),
-    fit(theme.fg("muted", "Live model availability, pricing, and per-model endpoint.")),
+    theme.fg("accent", theme.bold("AgentRouter · Status")),
+    theme.fg("muted", "Live model availability, pricing, and per-model endpoint."),
     "",
   ];
 
   if (report.keyMissing) {
-    lines.push(fit(theme.fg("warning", report.pricingNote)), "");
-    return [...lines, ...statusLegend(report, theme, width, clip)];
+    lines.push(statusRow("Key", "MISSING", [report.pricingNote], paint, "warning", 14));
+    lines.push("");
+    lines.push(paint("dim", "[Any key] Close"));
+    return frameRows(lines, width, clip, borderPainter(theme));
   }
 
-  const widths = statusColumnWidths(report.rows);
-  const cells = widths.reduce((sum, w) => sum + w, 0) + widths.length * 2 + pad.length;
-  // Narrow terminals squeeze the status column to nothing rather than overflowing;
-  // the row is clipped again below as a final guarantee.
-  const detailWidth = Math.max(0, width - cells);
-
-  lines.push(fit(theme.fg("muted", theme.bold(STATUS_HEADERS.slice(0, 4).map((h, i) => h.padEnd(widths[i]!)).join("  ") + "  " + STATUS_HEADERS[4]))));
+  // One label column across models and footer rows, so every `·` lands in the same column.
+  const column = Math.max(14, ...report.rows.map((row) => row.id.length));
   for (const row of report.rows) {
     const [input, output] = priceLabel(row.price);
-    const priceCell = (value: string, w: number) =>
-      theme.fg(row.price ? "text" : "muted", value.padEnd(w));
     lines.push(
-      fit(
-        theme.fg("accent", row.id.padEnd(widths[0]!))
-        + "  " + priceCell(input, widths[1]!)
-        + "  " + priceCell(output, widths[2]!)
-        + "  " + theme.fg("dim", row.api.padEnd(widths[3]!))
-        + "  " + theme.fg(statusColor(row.state), clip(row.detail, detailWidth)),
+      statusRow(
+        row.id,
+        row.state.toUpperCase(),
+        [
+          row.price ? `${input}/${output} per 1M` : "unpriced",
+          row.api,
+          row.state === "ready" ? false : row.detail,
+        ],
+        paint,
+        statusColor(row.state),
+        column,
       ),
     );
   }
 
-  const footerLabel = (label: string, value: string, color: "success" | "warning" | "error" | "muted") =>
-    fit(theme.fg("dim", label.padEnd(8)) + theme.fg(color, value));
   const pricingColor = report.pricingState === "live" ? "success" : report.pricingState === "stale" ? "warning" : "error";
   lines.push("");
-  lines.push(footerLabel("Pricing", report.pricingNote, pricingColor));
-  lines.push(footerLabel("Probe", "POST max_tokens=1 per model, on that model's own endpoint", "muted"));
-  lines.push(footerLabel("Ready", readyLabel(report), readyColor(report)));
+  lines.push(statusRow("Pricing", report.pricingState.toUpperCase(), [report.pricingNote], paint, pricingColor, column));
+  lines.push(statusRow("Probe", "POST", ["max_tokens=1 per model, on that model's own endpoint"], paint, "muted", column));
+  lines.push(statusRow("Ready", readyLabel(report), [`${report.rows.length} models probed`], paint, readyColor(report), column));
   lines.push("");
-  return [...lines, ...statusLegend(report, theme, width, clip)];
+  lines.push(paint("accent", `${report.rows.length} models`) + paint("dim", " · [Any key] Close"));
+  return frameRows(lines, width, clip, borderPainter(theme));
 }
 
-/** Footer legend in the /vision-watcher picker style: accent count, dim keys. */
-function statusLegend(report: StatusReport, theme: Theme, width: number, clip: Clip): string[] {
-  const count = report.rows.length ? `${report.rows.length} models` : "no models";
-  return [clip(" " + theme.fg("accent", count) + theme.fg("dim", " · [any key] close"), width)];
-}
-
-/** Container body for ctx.ui.custom; colours are recomputed on every render. */
-class AgentRouterStatusPanel implements Component {
-  private readonly report: StatusReport;
-  private readonly theme: Theme;
-  private readonly clip: Clip;
-
-  constructor(report: StatusReport, theme: Theme, clip: Clip) {
-    this.report = report;
-    this.theme = theme;
-    this.clip = clip;
-  }
-
-  render(width: number): string[] {
-    return renderStatusBody(this.report, this.theme, width, this.clip);
-  }
-
-  invalidate(): void {}
-}
-
-/**
- * Read-only panel framed like the /vision-watcher picker: accent border, any key closes.
- *
- * The TUI imports are dynamic because this file's self-check (check-framing.ts) runs
- * under plain node, where `@earendil-works/*` only resolves inside pi.
- */
+/** Read-only panel in the arnative rounded box; any key closes. The TUI import is dynamic because
+ *  this file's self-check (check-framing.ts) runs under plain node, where pi-tui does not resolve. */
 async function showStatusPanel(ctx: ExtensionCommandContext, report: StatusReport): Promise<void> {
-  const [{ DynamicBorder }, { Container, truncateToWidth }] = await Promise.all([
-    import("@earendil-works/pi-coding-agent"),
-    import("@earendil-works/pi-tui"),
-  ]);
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    const border = () => new DynamicBorder((s: string) => theme.fg("accent", s));
-    const container = new Container();
-    container.addChild(border());
-    container.addChild(new AgentRouterStatusPanel(report, theme, truncateToWidth));
-    container.addChild(border());
-    return {
-      render: (width: number) => container.render(width),
-      invalidate: () => container.invalidate(),
-      handleInput: () => done(),
-    };
-  });
+  const { truncateToWidth } = await import("@earendil-works/pi-tui");
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => ({
+    render: (width: number) => renderStatusBody(report, theme, width, truncateToWidth),
+    invalidate: () => undefined,
+    handleInput: () => done(),
+  }));
 }
 
 interface UsageModelRow {
@@ -808,100 +944,196 @@ function renderUsageText(report: UsageReport): string {
   return lines.join("\n");
 }
 
+/**
+ * The framed usage body: numeric table (model left, numbers right-aligned and dim, cost
+ * coloured by whether a price exists), then `Label · STATUS | detail` footer rows and the legend.
+ */
 export function renderUsageBody(
   report: UsageReport,
   theme: Theme,
   width: number,
   clip: Clip,
 ): string[] {
-  const pad = " ";
-  const fit = (line: string) => clip(pad + line, width);
+  const paint: StatusPainter = (token, text) => theme.fg(token as never, text);
   const lines: string[] = [
-    fit(theme.fg("accent", theme.bold("AgentRouter")) + theme.fg("dim", " · ") + theme.fg("accent", theme.bold(`Usage (${report.month})`))),
-    fit(theme.fg("muted", "Provider billing total and local session breakdown.")),
+    theme.fg("accent", theme.bold(`AgentRouter · Usage (${report.month})`)),
+    theme.fg("muted", "Provider billing total and local session breakdown."),
     "",
   ];
 
   if (report.rows.length === 0) {
-    lines.push(fit(theme.fg("muted", "(no AgentRouter usage recorded in local sessions this month)")), "");
+    lines.push(theme.fg("muted", "(no AgentRouter usage recorded in local sessions this month)"));
   } else {
     const widths = usageColumnWidths(report.rows);
-    lines.push(fit(theme.fg("muted", theme.bold(USAGE_HEADERS.map((h, i) => h.padEnd(widths[i]!)).join("  ")))));
+    lines.push(theme.fg("muted", theme.bold(USAGE_HEADERS.map((h, i) => h.padEnd(widths[i]!)).join("  "))));
     for (const row of report.rows) {
       const costStr = row.cost !== null ? usd(row.cost) : "?";
       lines.push(
-        fit(
-          theme.fg("accent", row.model.padEnd(widths[0]!))
-          + "  " + theme.fg("text", tokens(row.usage.input).padEnd(widths[1]!))
-          + "  " + theme.fg("text", tokens(row.usage.output).padEnd(widths[2]!))
-          + "  " + theme.fg("dim", `${tokens(row.usage.cacheRead)}/${tokens(row.usage.cacheWrite)}`.padEnd(widths[3]!))
-          + "  " + theme.fg(row.cost !== null ? "success" : "muted", costStr.padEnd(widths[4]!)),
-        ),
+        theme.fg("accent", row.model.padEnd(widths[0]!))
+        + "  " + theme.fg("dim", tokens(row.usage.input).padStart(widths[1]!))
+        + "  " + theme.fg("dim", tokens(row.usage.output).padStart(widths[2]!))
+        + "  " + theme.fg("dim", `${tokens(row.usage.cacheRead)}/${tokens(row.usage.cacheWrite)}`.padStart(widths[3]!))
+        + "  " + theme.fg(row.cost !== null ? "success" : "muted", costStr.padStart(widths[4]!)),
       );
     }
     const sumW = widths.slice(0, 4).reduce((sum, w) => sum + w, 0) + 3 * 2;
     lines.push(
-      fit(
-        theme.fg("muted", theme.bold("TOTAL".padEnd(sumW)))
-        + "  " + theme.fg("success", theme.bold(usd(report.totalCost))),
-      ),
+      theme.fg("muted", theme.bold("TOTAL".padEnd(sumW)))
+      + "  " + theme.fg("success", theme.bold(usd(report.totalCost).padStart(widths[4]!))),
     );
-    lines.push("");
   }
 
-  const footerLabel = (label: string, value: string, color: "success" | "warning" | "error" | "muted") =>
-    fit(theme.fg("dim", label.padEnd(16)) + theme.fg(color, value));
-
-  lines.push(footerLabel("Provider total", report.providerTotal, report.providerTotalState === "ok" ? "success" : "warning"));
-  lines.push(footerLabel("Local sessions", `${report.localFiles} files, ${report.localRecords} records (since ${report.sinceDate})`, "muted"));
+  const column = "Local sessions".length;
   lines.push("");
-
-  const count = report.rows.length ? `${report.rows.length} models` : "0 models";
-  lines.push(clip(" " + theme.fg("accent", count) + theme.fg("dim", " · [any key] close"), width));
-  return lines;
+  lines.push(statusRow("Provider total", report.providerTotalState === "ok" ? "OK" : "UNAVAILABLE", [report.providerTotal], paint, report.providerTotalState === "ok" ? "success" : "warning", column));
+  lines.push(statusRow("Local sessions", "SCANNED", [`${report.localFiles} files, ${report.localRecords} records (since ${report.sinceDate})`], paint, "muted", column));
+  lines.push(statusRow("Priced", report.fullyPriced ? "FULL" : "PARTIAL", ["input/output tokens x pricing; cache tokens unpriced"], paint, report.fullyPriced ? "success" : "warning", column));
+  lines.push("");
+  lines.push(paint("accent", `${report.rows.length} models`) + paint("dim", " · [Any key] Close"));
+  return frameRows(lines, width, clip, borderPainter(theme));
 }
 
-class AgentRouterUsagePanel implements Component {
-  private readonly report: UsageReport;
-  private readonly theme: Theme;
-  private readonly clip: Clip;
-
-  constructor(report: UsageReport, theme: Theme, clip: Clip) {
-    this.report = report;
-    this.theme = theme;
-    this.clip = clip;
-  }
-
-  render(width: number): string[] {
-    return renderUsageBody(this.report, this.theme, width, this.clip);
-  }
-
-  invalidate(): void {}
-}
-
+/** Read-only panel in the arnative rounded box; any key closes. Dynamic import for the same
+ *  plain-node self-check reason as showStatusPanel. */
 async function showUsagePanel(ctx: ExtensionCommandContext, report: UsageReport): Promise<void> {
-  const [{ DynamicBorder }, { Container, truncateToWidth }] = await Promise.all([
-    import("@earendil-works/pi-coding-agent"),
-    import("@earendil-works/pi-tui"),
-  ]);
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    const border = () => new DynamicBorder((s: string) => theme.fg("accent", s));
-    const container = new Container();
-    container.addChild(border());
-    container.addChild(new AgentRouterUsagePanel(report, theme, truncateToWidth));
-    container.addChild(border());
-    return {
-      render: (width: number) => container.render(width),
-      invalidate: () => container.invalidate(),
-      handleInput: () => done(),
-    };
-  });
+  const { truncateToWidth } = await import("@earendil-works/pi-tui");
+  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => ({
+    render: (width: number) => renderUsageBody(report, theme, width, truncateToWidth),
+    invalidate: () => undefined,
+    handleInput: () => done(),
+  }));
 }
 
 const AGENTROUTER_SUBCOMMANDS: AutocompleteItem[] = [
   { value: "status", label: "status", description: "Live per-model quota, pricing, and endpoint" },
   { value: "usage", label: "usage", description: "Monthly billing total and per-model cost from local sessions" },
 ];
+
+const MENU_TITLE = "pi-agentrouter · Menu";
+const MENU_DESC = "Account tools for the AgentRouter provider.";
+
+type MenuKey = "up" | "down" | "home" | "end" | "enter" | "escape";
+
+/** Key/match injection: `Key` and `matchesKey` are pi-tui values, imported dynamically so the
+ *  module still loads under the plain-node self-check. */
+type KeyAdapter = { matches(data: string, key: MenuKey): boolean } & Record<MenuKey, MenuKey>;
+
+type MenuRow = { key: "status" | "usage"; label: string; note: string };
+
+const MENU_ROWS: MenuRow[] = [
+  { key: "status", label: "Status", note: "Live per-model quota, pricing, and endpoint" },
+  { key: "usage", label: "Usage", note: "Monthly billing total and per-model cost" },
+];
+
+/**
+ * The root menu in the arnative rounded box. `ctx.ui.select` renders itself with two full-width
+ * rules, so a menu that must be rounded owns its component: `→` marker in accent, the chosen label
+ * in the soft tier bold, `·` dividers dim, labels padded so every divider lands in one column.
+ * The root menu carries no `[←] Back` — there is nothing behind it.
+ */
+export class AgentRouterMenu {
+  private readonly theme: Theme;
+  private readonly rows: MenuRow[];
+  private readonly clip: Clip;
+  private readonly keys: KeyAdapter;
+  private readonly done: (key: "status" | "usage" | null) => void;
+  private readonly paint: (text: string) => string;
+  private index = 0;
+  private readonly soft: (text: string) => string;
+  private readonly column: number;
+  private readonly footer = ["[↑↓] Move", "[Enter] Choose", "[Esc] Cancel"];
+
+  constructor(
+    theme: Theme,
+    rows: MenuRow[],
+    clip: Clip,
+    keys: KeyAdapter,
+    done: (key: "status" | "usage" | null) => void,
+    paint: (text: string) => string,
+  ) {
+    this.theme = theme;
+    this.rows = rows;
+    this.clip = clip;
+    this.keys = keys;
+    this.done = done;
+    this.paint = paint;
+    this.soft = chosenRowPainter(theme);
+    this.column = Math.max(...rows.map((row) => visibleWidth(row.label)));
+  }
+
+  handleInput(data: string): void {
+    const keys = this.keys;
+    if (keys.matches(data, keys.up)) {
+      this.index = (this.index - 1 + this.rows.length) % this.rows.length;
+      return;
+    }
+    if (keys.matches(data, keys.down)) {
+      this.index = (this.index + 1) % this.rows.length;
+      return;
+    }
+    if (keys.matches(data, keys.home)) {
+      this.index = 0;
+      return;
+    }
+    if (keys.matches(data, keys.end)) {
+      this.index = this.rows.length - 1;
+      return;
+    }
+    if (keys.matches(data, keys.enter)) {
+      this.done(this.rows[this.index]!.key);
+      return;
+    }
+    if (keys.matches(data, keys.escape)) this.done(null);
+  }
+
+  render(width: number): string[] {
+    const t = this.theme;
+    const lines = [
+      t.fg("accent", t.bold(MENU_TITLE)),
+      t.fg("muted", MENU_DESC),
+      "",
+    ];
+    for (const [i, item] of this.rows.entries()) {
+      const chosen = i === this.index;
+      const label = chosen ? this.soft(item.label) : t.fg("text", item.label);
+      const pad = " ".repeat(Math.max(0, this.column - visibleWidth(item.label)));
+      const note = `${t.fg("dim", "  ·  ")}${t.fg("dim", item.note)}`;
+      lines.push(`${chosen ? t.fg("accent", "→ ") : "  "}${label}${pad}${note}`);
+    }
+    lines.push("");
+    for (const pair of packPairs(this.footer, boxInner(width))) lines.push(t.fg("dim", pair));
+    return frameRows(lines, width, this.clip, this.paint);
+  }
+}
+
+/** Drive the menu everywhere: TUI gets the rounded box, RPC and headless keep `ctx.ui.select`. */
+async function showMenu(ctx: ExtensionCommandContext): Promise<"status" | "usage" | null> {
+  if (ctx.mode !== "tui") {
+    const labels = MENU_ROWS.map((row) => `${row.label} · ${row.note}`);
+    const choice = await ctx.ui.select(MENU_TITLE, labels);
+    const hit = choice ? MENU_ROWS.find((row, i) => labels[i] === choice) : undefined;
+    return hit ? hit.key : null;
+  }
+  const { Key, matchesKey, truncateToWidth } = await import("@earendil-works/pi-tui");
+  return ctx.ui.custom<"status" | "usage" | null>((tui, theme, _keybindings, done) => {
+    const menu = new AgentRouterMenu(
+      theme,
+      MENU_ROWS,
+      truncateToWidth,
+      { matches: matchesKey, up: Key.up, down: Key.down, home: Key.home, end: Key.end, enter: Key.enter, escape: Key.escape },
+      done,
+      borderPainter(theme),
+    );
+    return {
+      render: (width: number) => menu.render(width),
+      invalidate: () => undefined,
+      handleInput: (data: string) => {
+        menu.handleInput(data);
+        tui.requestRender();
+      },
+    };
+  });
+}
 
 export function registerAgentRouterCommands(pi: ExtensionAPI): void {
   pi.registerCommand("agentrouter", {
@@ -921,50 +1153,30 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
       const modelIds = liveModels.length > 0
         ? new Set<string>([...liveModels.map((m) => m.id), ...AGENTROUTER_MODEL_IDS])
         : undefined;
-      if (sub === "status") {
+      const runStatus = async (): Promise<void> => {
         const report = await buildStatusReport(readApiKey(), targets);
-        if (ctx.hasUI && ctx.mode === "tui") {
+        if (ctx.mode === "tui") {
           await showStatusPanel(ctx, report);
           return;
         }
         ctx.ui.notify(renderStatusText(report), "info");
-        return;
-      }
-      if (sub === "usage") {
+      };
+      const runUsage = async (): Promise<void> => {
         const report = await buildUsageReport(readApiKey(), modelIds);
-        if (ctx.hasUI && ctx.mode === "tui") {
+        if (ctx.mode === "tui") {
           await showUsagePanel(ctx, report);
           return;
         }
         ctx.ui.notify(renderUsageText(report), "info");
-        return;
-      }
+      };
+      if (sub === "status") return runStatus();
+      if (sub === "usage") return runUsage();
       if (sub === "") {
         if (ctx.hasUI) {
-          const options = [
-            "Status  ·  Live per-model quota, pricing, and endpoint",
-            "Usage   ·  Monthly billing total and per-model cost",
-          ];
-          const choice = await ctx.ui.select("pi-agentrouter · Menu", options);
-          if (!choice) return;
-          if (choice === options[0]) {
-            const report = await buildStatusReport(readApiKey(), targets);
-            if (ctx.mode === "tui") {
-              await showStatusPanel(ctx, report);
-              return;
-            }
-            ctx.ui.notify(renderStatusText(report), "info");
-            return;
-          }
-          if (choice === options[1]) {
-            const report = await buildUsageReport(readApiKey(), modelIds);
-            if (ctx.mode === "tui") {
-              await showUsagePanel(ctx, report);
-              return;
-            }
-            ctx.ui.notify(renderUsageText(report), "info");
-            return;
-          }
+          const picked = await showMenu(ctx);
+          if (picked === "status") return runStatus();
+          if (picked === "usage") return runUsage();
+          return;
         }
         const theme = ctx.ui.theme;
         const msg = [

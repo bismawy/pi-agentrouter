@@ -2,11 +2,10 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
+- `/agentrouter` screens rebuilt on the arnative design system (per the `/arnative-pi` skill): status and usage render inside the rounded box (`╭ ╮ ╰ ╯`, one content row per line, soft-accent border derived from the theme), status rows follow `Label · STATUS | detail` with one aligned divider column, the root menu is a custom list picker (accent `→` marker, soft-tier bold label, dim dividers and `[↑↓] Move  [Enter] Choose  [Esc] Cancel` legend) instead of `ctx.ui.select`, and every keybind is bracketed and dim. Headless/RPC paths keep the plain text and `select` fallbacks.
 - Live model catalog discovery: `refreshModels` probes `GET /v1/models` with the stored key (codex_cli_rs client headers) on every pi model refresh — startup and right after `/login` — so `/model` always mirrors what the AgentRouter account actually lists. New users no longer add model ids by hand.
 - Unknown catalog ids register with a conservative text-only default (Sol-style limits, session-affinity compat); verified per-model wire configs live on in `MODEL_BLUEPRINTS` and reattach automatically when a retired id is relisted.
-
-### Changed
 - `package.json` `description` now leads with the README tagline ("Unified frontier models. Self-healing WAF recovery. Zero workflow interruption.") followed by the capability summary, per the `/arnative-pi` manifest standard — pi.dev/packages renders this field verbatim as the package card description.
 - Static registration is now a snapshot of the live catalog (`gpt-6-astra`, `gpt-5.6-sol`, `gpt-6.1-sol`) served only until the first probe; the four delisted ids (`claude-opus-4-8`, `claude-opus-5`, `deepseek-v4-flash`, `glm-5.3`) are no longer registered by default.
 - `/agentrouter status` derives its probe targets from the live model registry instead of the static list; `/agentrouter usage` accepts session model ids from the live catalog on top of the historical set.
