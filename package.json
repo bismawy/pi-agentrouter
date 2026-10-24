@@ -1,7 +1,7 @@
 {
   "name": "@bismawy/pi-agentrouter",
   "version": "1.6.2",
-  "description": "AgentRouter provider for Pi: access frontier models under one namespace with self-healing WAF recovery and automatic turn translation.",
+  "description": "Unified frontier models. Self-healing WAF recovery. Zero workflow interruption. GPT-6 Astra, Claude, DeepSeek and GLM under one agentrouter/ namespace.",
   "type": "module",
   "keywords": [
     "pi-package",
