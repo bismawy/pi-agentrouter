@@ -1,7 +1,7 @@
 /** Self-check against the actual extension hooks. Run: bun ./check-framing.ts */
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import register from "./index.ts";
+import register, { MODEL_BLUEPRINTS, blueprintFor } from "./index.ts";
 import { AGENTROUTER_PROBE_TARGETS, renderStatusBody, renderUsageBody } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
@@ -196,7 +196,12 @@ assert.equal(astra.reasoning, true);
 assert.equal(astra.thinkingLevelMap.xhigh, "xhigh");
 assert.deepEqual(astra.input, ["text", "image"]);
 assert.equal(provider.api, "openai-completions");
-assert.equal(provider.models.length, 6);
+// Static registration is only the snapshot served before the first refreshModels
+// phase; the live /v1/models catalog takes over from there.
+assert.deepEqual(provider.models.map((m: Wire) => m.id), ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.1-sol"]);
+assert.equal(typeof provider.refreshModels, "function", "live catalog discovery must be registered");
+const offlineCatalog = await provider.refreshModels({ allowNetwork: false, signal: new AbortController().signal });
+assert.deepEqual(offlineCatalog.map((m: Wire) => m.id), ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.1-sol"], "offline refresh serves the static snapshot");
 // pi ignores provider-level compat for extension providers — it must live on each model,
 // and the provider must stay self-sufficient without pi-auto-compat's modelOverrides.
 assert.equal(provider.compat, undefined);
@@ -204,11 +209,18 @@ for (const m of provider.models) {
   assert.equal(m.compat?.sendSessionAffinityHeaders, true, `${m.id}: session affinity must be per-model`);
   assert.equal(m.compat?.supportsLongCacheRetention, true, `${m.id}: long cache retention must be declared`);
 }
+// Blueprint quirks survive delisting: a relisted id must keep its verified wire config.
 for (const id of ["claude-opus-4-8", "claude-opus-5"]) {
-  const claude = provider.models.find((m: Wire) => m.id === id);
+  const claude = MODEL_BLUEPRINTS[id] as Wire;
   assert.equal(claude.compat?.forceAdaptiveThinking, true, `${id}: adaptive thinking must be declared on proxy models`);
+  assert.equal(claude.api, "anthropic-messages", `${id}: anthropic-messages wire`);
 }
-assert.equal(provider.models.find((m: Wire) => m.id === "claude-opus-5").api, "anthropic-messages");
+assert.equal((MODEL_BLUEPRINTS["deepseek-v4-flash"] as Wire).compat?.thinkingFormat, "deepseek");
+assert.equal((MODEL_BLUEPRINTS["glm-5.3"] as Wire).thinkingLevelMap.medium, "high");
+// Unknown catalog ids get a conservative text-only default, never an empty catalog.
+const unknown = blueprintFor("future-model-x") as Wire;
+assert.deepEqual(unknown.input, ["text"]);
+assert.equal(unknown.compat?.sendSessionAffinityHeaders, true, "unknown ids still declare session affinity");
 const foreign = { model: "gpt-6-astra", input: [{ role: "user", content: "hello" }] };
 const foreignSaved = structuredClone(foreign);
 hooks.get("before_provider_request")!({ payload: foreign }, { model: { provider: "openai-codex" } });

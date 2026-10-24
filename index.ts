@@ -2,18 +2,20 @@
  * AgentRouter Provider Extension for pi
  *
  * Registers AgentRouter (https://agentrouter.org/register?aff=CKdn) as a single custom provider
- * with GPT-6 Astra, GPT-5.6 Sol, Claude Opus 4.8, Claude Opus 5, DeepSeek V4 Flash, and GLM 5.3.
+ * whose catalog is discovered live from GET /v1/models on every pi model refresh (startup and
+ * right after /login). Verified per-model wire configs live in MODEL_BLUEPRINTS; catalog ids
+ * without a blueprint get a conservative text-only default. When the probe cannot run
+ * (offline, missing key, WAF) the snapshot in STATIC_MODEL_IDS is served instead.
  * GPT-6 Astra uses openai-responses; Claude models use anthropic-messages;
  * the rest ride the provider-level openai-completions config.
  *
  * Setup:
  *   1. /login agentrouter  (or set AGENTROUTER_API_KEY)
  *   2. Install: pi install npm:@bismawy/pi-agentrouter
- *   3. /model → agentrouter/gpt-6-astra, agentrouter/gpt-5.6-sol, agentrouter/claude-opus-4-8,
- *      agentrouter/claude-opus-5, agentrouter/deepseek-v4-flash, agentrouter/glm-5.3
+ *   3. /model → every model the account's /v1/models catalog lists, e.g. agentrouter/gpt-6.1-sol
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { registerAgentRouterCommands } from "./agentrouter-commands.ts";
 
 /**
@@ -682,156 +684,237 @@ const AGENTROUTER_COMPAT = {
   supportsLongCacheRetention: true,
 } as const;
 
+/**
+ * AgentRouter's edge rejects unknown clients ("unauthorized client detected"), so the
+ * discovery probe must present the same codex_cli_rs identity the chat calls use.
+ */
+const AGENTROUTER_CLIENT_HEADERS = {
+  "Originator": "codex_cli_rs",
+  "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+  "Version": "0.101.0",
+} as const;
+
+/**
+ * Verified wire configs keyed by model id. VISIBILITY comes from the live /v1/models
+ * catalog on refresh; these blueprints only decide how each visible model talks.
+ * Ids the service delists disappear from /model; ids that return keep their quirks.
+ */
+export const MODEL_BLUEPRINTS: Record<string, ProviderModelConfig> = {
+  "gpt-6-astra": {
+    id: "gpt-6-astra",
+    name: "GPT-6 Astra (AgentRouter)",
+    // Chat Completions rejects function tools with reasoning for this model.
+    api: "openai-responses",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    // Provisional limits based on GPT-5.6 Sol; update when AgentRouter confirms Astra's limits.
+    contextWindow: 272000,
+    maxTokens: 16384,
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: { ...AGENTROUTER_COMPAT },
+  },
+  "gpt-5.6-sol": {
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6 Sol (AgentRouter)",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 272000,
+    maxTokens: 16384,
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: { ...AGENTROUTER_COMPAT },
+  },
+  "gpt-6.1-sol": {
+    id: "gpt-6.1-sol",
+    name: "GPT-6.1 Sol (AgentRouter)",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 272000,
+    maxTokens: 16384,
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: { ...AGENTROUTER_COMPAT },
+  },
+  "deepseek-v4-flash": {
+    id: "deepseek-v4-flash",
+    name: "DeepSeek V4 Flash (AgentRouter)",
+    reasoning: true,
+    // AgentRouter backend rejects images for this model ("This model does not support image")
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 8192,
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: {
+      ...AGENTROUTER_COMPAT,
+      requiresReasoningContentOnAssistantMessages: true,
+      thinkingFormat: "deepseek",
+    },
+  },
+  "glm-5.3": {
+    id: "glm-5.3",
+    name: "GLM 5.3 (AgentRouter)",
+    reasoning: true,
+    // AgentRouter backend is text-only here: image_url blocks get
+    // "***.***.type 参数非法，取值范围 ['text']" 400 errors
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 8192,
+    // Backend only accepts low/high/max (always-on thinking)
+    thinkingLevelMap: {
+      low: "low",
+      medium: "high",
+      high: "high",
+      xhigh: "max",
+    },
+    compat: { ...AGENTROUTER_COMPAT },
+  },
+  // Claude models ride the Anthropic Messages API via per-model overrides
+  "claude-opus-4-8": {
+    id: "claude-opus-4-8",
+    name: "Claude Opus 4.8 (AgentRouter)",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+    api: "anthropic-messages",
+    baseUrl: "https://agentrouter.org",
+    headers: {
+      "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta":
+        "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "x-app": "cli",
+    },
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: {
+      ...AGENTROUTER_COMPAT,
+      cacheControlFormat: "anthropic",
+      // pi ships adaptive thinking in the metadata of real Claude models; on a
+      // proxy model it must be declared or pi falls back to budget thinking.
+      forceAdaptiveThinking: true,
+    },
+  },
+  "claude-opus-5": {
+    id: "claude-opus-5",
+    name: "Claude Opus 5 (AgentRouter)",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+    api: "anthropic-messages",
+    baseUrl: "https://agentrouter.org",
+    headers: {
+      "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta":
+        "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "x-app": "cli",
+    },
+    thinkingLevelMap: {
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    },
+    compat: {
+      ...AGENTROUTER_COMPAT,
+      cacheControlFormat: "anthropic",
+      forceAdaptiveThinking: true,
+    },
+  },
+};
+
+/** Catalog snapshot confirmed live on 2026-10-24; served until the first successful probe. */
+const STATIC_MODEL_IDS = ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.1-sol"];
+
+export function blueprintFor(id: string): ProviderModelConfig {
+  const known = MODEL_BLUEPRINTS[id];
+  if (known) return { ...known };
+  return {
+    id,
+    name: `${id} (AgentRouter)`,
+    reasoning: true,
+    // Unverified catalog entries stay text-only: a wrong image claim fails the
+    // first request, a missing one only narrows input.
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 272000,
+    maxTokens: 16384,
+    compat: { ...AGENTROUTER_COMPAT },
+  };
+}
+
+/**
+ * Fetches the live /v1/models catalog and maps it onto blueprint configs.
+ * Any probe failure returns the static snapshot, so the catalog is never empty.
+ */
+async function probeLiveModels(apiKey: string, signal: AbortSignal): Promise<ProviderModelConfig[]> {
+  const fallback = STATIC_MODEL_IDS.map(blueprintFor);
+  try {
+    const res = await fetch("https://agentrouter.org/v1/models", {
+      headers: { ...AGENTROUTER_CLIENT_HEADERS, Authorization: `Bearer ${apiKey}` },
+      signal,
+    });
+    if (!res.ok) return fallback;
+    const json = (await res.json()) as { data?: { id?: unknown }[] };
+    const ids = (json.data ?? [])
+      .map((entry) => (typeof entry.id === "string" ? entry.id : ""))
+      .filter((id) => id !== "");
+    return ids.length > 0 ? ids.map(blueprintFor) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("agentrouter", {
     baseUrl: "https://agentrouter.org/v1",
     apiKey: "$AGENTROUTER_API_KEY",
     api: "openai-completions",
-    headers: {
-      "Originator": "codex_cli_rs",
-      "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-      "Version": "0.101.0",
+    headers: { ...AGENTROUTER_CLIENT_HEADERS },
+    // Served until pi's first refreshModels phase replaces it with the live catalog.
+    models: STATIC_MODEL_IDS.map(blueprintFor),
+    refreshModels: async (context) => {
+      const credential = context.credential;
+      const apiKey =
+        credential?.type === "api_key" && credential.key
+          ? credential.key
+          : process.env.AGENTROUTER_API_KEY;
+      if (!context.allowNetwork || !apiKey) return STATIC_MODEL_IDS.map(blueprintFor);
+      return probeLiveModels(apiKey, context.signal);
     },
-    models: [
-      {
-        id: "gpt-6-astra",
-        name: "GPT-6 Astra (AgentRouter)",
-        // Chat Completions rejects function tools with reasoning for this model.
-        api: "openai-responses",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // Provisional limits based on GPT-5.6 Sol; update when AgentRouter confirms Astra's limits.
-        contextWindow: 272000,
-        maxTokens: 16384,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: { ...AGENTROUTER_COMPAT },
-      },
-      {
-        id: "gpt-5.6-sol",
-        name: "GPT-5.6 Sol (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 272000,
-        maxTokens: 16384,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: { ...AGENTROUTER_COMPAT },
-      },
-      {
-        id: "deepseek-v4-flash",
-        name: "DeepSeek V4 Flash (AgentRouter)",
-        reasoning: true,
-        // AgentRouter backend rejects images for this model ("This model does not support image")
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 8192,
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          ...AGENTROUTER_COMPAT,
-          requiresReasoningContentOnAssistantMessages: true,
-          thinkingFormat: "deepseek",
-        },
-      },
-      {
-        id: "glm-5.3",
-        name: "GLM 5.3 (AgentRouter)",
-        reasoning: true,
-        // AgentRouter backend is text-only here: image_url blocks get
-        // "***.***.type 参数非法，取值范围 ['text']" 400 errors
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 8192,
-        // Backend only accepts low/high/max (always-on thinking)
-        thinkingLevelMap: {
-          low: "low",
-          medium: "high",
-          high: "high",
-          xhigh: "max",
-        },
-        compat: { ...AGENTROUTER_COMPAT },
-      },
-      // Claude models ride the Anthropic Messages API via per-model overrides
-      {
-        id: "claude-opus-4-8",
-        name: "Claude Opus 4.8 (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 8192,
-        api: "anthropic-messages",
-        baseUrl: "https://agentrouter.org",
-        headers: {
-          "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta":
-            "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
-          "anthropic-dangerous-direct-browser-access": "true",
-          "x-app": "cli",
-        },
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          ...AGENTROUTER_COMPAT,
-          cacheControlFormat: "anthropic",
-          // pi ships adaptive thinking in the metadata of real Claude models; on a
-          // proxy model it must be declared or pi falls back to budget thinking.
-          forceAdaptiveThinking: true,
-        },
-      },
-      {
-        id: "claude-opus-5",
-        name: "Claude Opus 5 (AgentRouter)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 8192,
-        api: "anthropic-messages",
-        baseUrl: "https://agentrouter.org",
-        headers: {
-          "User-Agent": "claude-cli/2.1.158 (external, sdk-cli)",
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta":
-            "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12",
-          "anthropic-dangerous-direct-browser-access": "true",
-          "x-app": "cli",
-        },
-        thinkingLevelMap: {
-          low: "low",
-          medium: "medium",
-          high: "high",
-          xhigh: "xhigh",
-        },
-        compat: {
-          ...AGENTROUTER_COMPAT,
-          cacheControlFormat: "anthropic",
-          forceAdaptiveThinking: true,
-        },
-      },
-    ],
   });
 
   registerAgentRouterCommands(pi);

@@ -52,20 +52,25 @@ const PRICING_TTL_MS = 24 * 60 * 60 * 1000;
 const BASE_UNIT_USD_PER_MILLION = 2;
 
 /**
- * Probe targets mirror the provider's model list. `check-framing.ts` asserts
- * these stay in sync with the registered models, so drift fails a test rather
- * than silently reporting the wrong endpoint.
+ * Probe targets mirror the provider's live catalog snapshot (see MODEL_BLUEPRINTS in
+ * index.ts; the /agentrouter handler overrides this with the model registry when live
+ * models are available). `check-framing.ts` asserts the snapshot stays in sync with
+ * the statically registered models, so drift fails a test rather than silently
+ * reporting the wrong endpoint.
  */
 export const AGENTROUTER_PROBE_TARGETS = [
   { id: "gpt-6-astra", api: "openai-responses", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
   { id: "gpt-5.6-sol", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
-  { id: "deepseek-v4-flash", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
-  { id: "glm-5.3", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
-  { id: "claude-opus-4-8", api: "anthropic-messages", baseUrl: AGENTROUTER_ORIGIN },
-  { id: "claude-opus-5", api: "anthropic-messages", baseUrl: AGENTROUTER_ORIGIN },
+  { id: "gpt-6.1-sol", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
 ] as const;
 
-const AGENTROUTER_MODEL_IDS = new Set<string>(AGENTROUTER_PROBE_TARGETS.map((t) => t.id));
+/** Delisted from the live catalog but still present in historical session files. */
+const RETIRED_MODEL_IDS = ["deepseek-v4-flash", "glm-5.3", "claude-opus-4-8", "claude-opus-5"] as const;
+
+const AGENTROUTER_MODEL_IDS = new Set<string>([
+  ...AGENTROUTER_PROBE_TARGETS.map((t) => t.id),
+  ...RETIRED_MODEL_IDS,
+]);
 
 interface PricingEntry {
   inputPerMillion: number;
@@ -314,19 +319,19 @@ export function findUsage(node: unknown, depth = 0): UsageTotals | null {
   return null;
 }
 
-export function findModel(node: unknown, depth = 0): string | null {
+export function findModel(node: unknown, depth = 0, ids: ReadonlySet<string> = AGENTROUTER_MODEL_IDS): string | null {
   if (depth > 8) return null;
-  if (typeof node === "string") return AGENTROUTER_MODEL_IDS.has(node) ? node : null;
+  if (typeof node === "string") return ids.has(node) ? node : null;
   if (Array.isArray(node)) {
     for (const item of node) {
-      const hit = findModel(item, depth + 1);
+      const hit = findModel(item, depth + 1, ids);
       if (hit) return hit;
     }
     return null;
   }
   if (!isRecord(node)) return null;
   for (const value of Object.values(node)) {
-    const hit = findModel(value, depth + 1);
+    const hit = findModel(value, depth + 1, ids);
     if (hit) return hit;
   }
   return null;
@@ -363,7 +368,7 @@ interface SessionScan {
  * AgentRouter's per-request log is only reachable with a browser session, so
  * local sessions are the cookie-free source for the per-model breakdown.
  */
-export function scanSessions(sinceMs: number, filter?: (file: string) => boolean): SessionScan {
+export function scanSessions(sinceMs: number, filter?: (file: string) => boolean, modelIds?: ReadonlySet<string>): SessionScan {
   const byModel = new Map<string, UsageTotals>();
   let files = 0;
   let records = 0;
@@ -398,7 +403,7 @@ export function scanSessions(sinceMs: number, filter?: (file: string) => boolean
       // ponytail: first-match pairing; revisit if entries ever pack multiple messages.
       const usage = findUsage(parsed);
       if (!usage) continue;
-      const model = findModel(parsed);
+      const model = findModel(parsed, 0, modelIds);
       if (!model) continue;
 
       records++;
@@ -467,7 +472,9 @@ interface StatusReport {
   pricingState: "live" | "stale" | "missing";
 }
 
-async function buildStatusReport(apiKey: string | null): Promise<StatusReport> {
+type ProbeTarget = { id: string; api: string; baseUrl: string };
+
+async function buildStatusReport(apiKey: string | null, targets: readonly ProbeTarget[] = AGENTROUTER_PROBE_TARGETS): Promise<StatusReport> {
   if (!apiKey) {
     return {
       keyMissing: true,
@@ -493,7 +500,7 @@ async function buildStatusReport(apiKey: string | null): Promise<StatusReport> {
       : `unavailable (${message})`;
   }
 
-  const results = await Promise.all(AGENTROUTER_PROBE_TARGETS.map((t) => probeModel(t, apiKey)));
+  const results = await Promise.all(targets.map((t) => probeModel(t, apiKey)));
   return {
     keyMissing: false,
     rows: results.map((r) => ({ ...r, price: prices.get(r.id) ?? null })),
@@ -688,7 +695,7 @@ interface UsageReport {
   fullyPriced: boolean;
 }
 
-async function buildUsageReport(apiKey: string | null): Promise<UsageReport> {
+async function buildUsageReport(apiKey: string | null, modelIds?: ReadonlySet<string>): Promise<UsageReport> {
   const now = new Date();
   let providerTotal = "unavailable (no API key)";
   let providerTotalState: "ok" | "unavailable" = "unavailable";
@@ -721,7 +728,7 @@ async function buildUsageReport(apiKey: string | null): Promise<UsageReport> {
 
   const cached = readPricingCache();
   const prices = new Map(Object.entries(cached?.prices ?? {}));
-  const scan = scanSessions(monthStartMs(now));
+  const scan = scanSessions(monthStartMs(now), undefined, modelIds);
 
   let totalCost = 0;
   let fullyPriced = true;
@@ -905,8 +912,17 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
     },
     handler: async (args, ctx) => {
       const sub = args.trim().toLowerCase();
+      // The registry reflects the live-discovered catalog; the exported snapshot is
+      // only the fallback for contexts without a registry (tests, early startup).
+      const liveModels = ctx.modelRegistry?.getModelsOfType?.("chat", "agentrouter") ?? [];
+      const targets = liveModels.length > 0
+        ? liveModels.map((m) => ({ id: m.id, api: String(m.api), baseUrl: String(m.baseUrl ?? `${AGENTROUTER_ORIGIN}/v1`) }))
+        : undefined;
+      const modelIds = liveModels.length > 0
+        ? new Set<string>([...liveModels.map((m) => m.id), ...AGENTROUTER_MODEL_IDS])
+        : undefined;
       if (sub === "status") {
-        const report = await buildStatusReport(readApiKey());
+        const report = await buildStatusReport(readApiKey(), targets);
         if (ctx.hasUI && ctx.mode === "tui") {
           await showStatusPanel(ctx, report);
           return;
@@ -915,7 +931,7 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
         return;
       }
       if (sub === "usage") {
-        const report = await buildUsageReport(readApiKey());
+        const report = await buildUsageReport(readApiKey(), modelIds);
         if (ctx.hasUI && ctx.mode === "tui") {
           await showUsagePanel(ctx, report);
           return;
@@ -932,7 +948,7 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
           const choice = await ctx.ui.select("pi-agentrouter · Menu", options);
           if (!choice) return;
           if (choice === options[0]) {
-            const report = await buildStatusReport(readApiKey());
+            const report = await buildStatusReport(readApiKey(), targets);
             if (ctx.mode === "tui") {
               await showStatusPanel(ctx, report);
               return;
@@ -941,7 +957,7 @@ export function registerAgentRouterCommands(pi: ExtensionAPI): void {
             return;
           }
           if (choice === options[1]) {
-            const report = await buildUsageReport(readApiKey());
+            const report = await buildUsageReport(readApiKey(), modelIds);
             if (ctx.mode === "tui") {
               await showUsagePanel(ctx, report);
               return;

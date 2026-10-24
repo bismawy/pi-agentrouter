@@ -18,16 +18,17 @@ pi-agentrouter provides a unified provider for [AgentRouter](https://agentrouter
 - **Payload Sanitization:** Strips ANSI escape codes, null bytes, control characters, and orphan Unicode surrogates before dispatch.
 - **Session Affinity:** Injects `sendSessionAffinityHeaders: true` by default to maximize server-side cache hits.
 
-## Registered Models
+## Model Catalog
+
+The catalog is discovered live: on every pi model refresh (startup and right after `/login`), the extension probes `GET https://agentrouter.org/v1/models` with your key and registers exactly what the account lists — no manual model entries. Any probe failure (offline, missing key, WAF) falls back to the last confirmed snapshot. Current snapshot and verified wire configs:
 
 | Model | Context | Input | Protocol | Thinking |
 | :--- | :--- | :--- | :--- | :--- |
 | `agentrouter/gpt-6-astra` | 272k | text, image | OpenAI Responses | `low` – `xhigh` |
 | `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
-| `agentrouter/claude-opus-5` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
-| `agentrouter/claude-opus-4-8` | 200k | text, image | Anthropic Messages | `low` – `xhigh` |
-| `agentrouter/deepseek-v4-flash` | 131k | text | OpenAI Completions | `low` – `xhigh` |
-| `agentrouter/glm-5.3` | 131k | text | OpenAI Completions | `low` – `xhigh` |
+| `agentrouter/gpt-6.1-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
+
+Catalog ids without a verified config register with a conservative text-only default. Retired ids keep their wire configs in `MODEL_BLUEPRINTS`, so a relisted model (e.g. `claude-opus-5`, `glm-5.3`, `deepseek-v4-flash`) automatically comes back with the right protocol.
 
 ## Install
 
