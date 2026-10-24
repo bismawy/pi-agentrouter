@@ -26,7 +26,7 @@ The catalog is discovered live: on every pi model refresh (startup and right aft
 | :--- | :--- | :--- | :--- | :--- |
 | `agentrouter/gpt-6-astra` | 272k | text, image | OpenAI Responses | `low` – `xhigh` |
 | `agentrouter/gpt-5.6-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
-| `agentrouter/gpt-6.1-sol` | 272k | text, image | OpenAI Completions | `low` – `xhigh` |
+| `agentrouter/gpt-6.1-sol` | 272k | text, image | OpenAI Responses | `low` – `xhigh` |
 
 Catalog ids without a verified config register with a conservative text-only default. Retired ids keep their wire configs in `MODEL_BLUEPRINTS`, so a relisted model (e.g. `claude-opus-5`, `glm-5.3`, `deepseek-v4-flash`) automatically comes back with the right protocol.
 

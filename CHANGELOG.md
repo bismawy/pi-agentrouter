@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `gpt-6.1-sol` rides the OpenAI Responses API: the backend rejects `/v1/chat/completions` for it ("please use /v1/responses instead"), so its blueprint and the status-probe target now declare `openai-responses` like `gpt-6-astra` (verified live with a 200 on `/v1/responses`).
+
 ### Changed
 - The rounded-box border now follows the session's thinking level: `borderPainter` paints the theme's `thinking*` slot from `ctx.thinkingLevel` (pi-arnative's own `renderScreen` rule), with `dim` as the theme-level fallback — the soft accent tier stays on the chosen row and never paints the frame. All three screens (status, usage, menu) receive the level.
 - `/agentrouter` screens rebuilt on the arnative design system (per the `/arnative-pi` skill): status and usage render inside the rounded box (`╭ ╮ ╰ ╯`, one content row per line, soft-accent border derived from the theme), status rows follow `Label · STATUS | detail` with one aligned divider column, the root menu is a custom list picker (accent `→` marker, soft-tier bold label, dim dividers and `[↑↓] Move  [Enter] Choose  [Esc] Cancel` legend) instead of `ctx.ui.select`, and every keybind is bracketed and dim. Headless/RPC paths keep the plain text and `select` fallbacks.

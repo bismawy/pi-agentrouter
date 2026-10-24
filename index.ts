@@ -738,6 +738,8 @@ export const MODEL_BLUEPRINTS: Record<string, ProviderModelConfig> = {
   "gpt-6.1-sol": {
     id: "gpt-6.1-sol",
     name: "GPT-6.1 Sol (AgentRouter)",
+    // Like Astra, the 6.1 Sol rejects /v1/chat/completions ("please use /v1/responses instead").
+    api: "openai-responses",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

@@ -61,7 +61,7 @@ const BASE_UNIT_USD_PER_MILLION = 2;
 export const AGENTROUTER_PROBE_TARGETS = [
   { id: "gpt-6-astra", api: "openai-responses", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
   { id: "gpt-5.6-sol", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
-  { id: "gpt-6.1-sol", api: "openai-completions", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
+  { id: "gpt-6.1-sol", api: "openai-responses", baseUrl: `${AGENTROUTER_ORIGIN}/v1` },
 ] as const;
 
 /** Delisted from the live catalog but still present in historical session files. */
