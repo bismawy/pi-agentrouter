@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import register, { MODEL_BLUEPRINTS, blueprintFor } from "./index.ts";
-import { AGENTROUTER_PROBE_TARGETS, AgentRouterMenu, boxFrame, packPairs, renderStatusBody, renderUsageBody, statusRow, visibleWidth } from "./agentrouter-commands.ts";
+import { AGENTROUTER_PROBE_TARGETS, AgentRouterMenu, borderPainter, boxFrame, packPairs, renderStatusBody, renderUsageBody, statusRow, visibleWidth } from "./agentrouter-commands.ts";
 
 // Loose wire payloads intentionally include missing/null fields from real requests.
 type Wire = Record<string, any>;
@@ -205,6 +205,31 @@ assert.deepEqual(packPairs(["[↑↓] Move", "[Enter] Choose", "[Esc] Cancel"], 
   menu.handleInput("enter");
   menu.handleInput("escape");
   assert.deepEqual(outcomes, ["usage", null], "enter chooses and escape cancels");
+}
+
+// BORDER_CHECK: the frame follows the session's thinking level (pi-arnative lib/box.ts rule:
+// renderScreen defaults its border to the thinking slot — the soft tier never paints the frame).
+{
+  const tokens: string[] = [];
+  const recording = { fg: (c: string, t: string) => { tokens.push(c); return t; }, bold: (t: string) => t };
+  borderPainter(recording as never, "high")("x");
+  assert.ok(tokens.includes("thinkingHigh"), `level high must paint the thinkingHigh slot: ${tokens}`);
+  tokens.length = 0;
+  borderPainter(recording as never, undefined)("x");
+  assert.ok(tokens.includes("thinkingOff"), "a missing level paints the thinkingOff slot");
+  // A theme that rejects the slot (pi >=1.2.0 throws on unknown tokens) falls back to dim.
+  const strict = {
+    fg: (c: string, t: string) => {
+      if (c.startsWith("thinking")) throw new Error("unknown theme color");
+      return `<${c}>${t}`;
+    },
+    bold: (t: string) => t,
+  };
+  assert.equal(borderPainter(strict as never, "max")("x"), "<dim>x", "a theme without the slot falls back to dim");
+  assert.equal(borderPainter(null)("x"), "x", "no theme renders uncoloured");
+  colorsUsed.clear();
+  renderStatusBody(statusPanel, fakeTheme, 80, plainClip, "xhigh");
+  assert.ok(colorsUsed.has("thinkingXhigh"), "panel frame must follow the thinking level it is handed");
 }
 assert.ok(renderUsageBody(sampleUsage, fakeTheme, 100, plainClip).map(stripAnsi).some((l) => l.includes("$12.45")), "provider total shown");
 const registered = new Map<string, { api: string; baseUrl: string }>(

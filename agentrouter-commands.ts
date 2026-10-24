@@ -612,8 +612,22 @@ const softPainter = (
 
 /** The box border: the arnative soft accent where the theme has it, otherwise the theme's
  *  `borderAccent` softened, and only then the session's thinking slot; identity with no theme. */
+/**
+ * The box border: the session's thinking slot — pi-arnative's own rule (lib/box.ts `renderScreen`
+ * defaults its border to `thinkingColorOf(theme, level)`). The frame tracks the model's reasoning
+ * effort; the soft tier stays on the chosen row, never the border. A theme without the slot draws
+ * `dim` so a non-arnative theme still gets a plain frame; no theme draws uncoloured.
+ */
 export function borderPainter(theme: BoxTheme | null | undefined, thinkingLevel?: string): (text: string) => string {
-  return softPainter(theme, ["accentSoft"], "borderAccent", [thinkingColorSlot(thinkingLevel), "accent"]);
+  const fg = theme?.fg?.bind(theme);
+  if (!fg) return (text) => text;
+  const slot = thinkingColorSlot(thinkingLevel);
+  try {
+    fg(slot, "");
+    return (text) => fg(slot, text);
+  } catch {
+    return (text) => fg("dim", text);
+  }
 }
 
 /** A chosen row's body: the `→` marker keeps the accent, the text moves to the soft tint, bold. */
@@ -757,6 +771,7 @@ export function renderStatusBody(
   theme: Theme,
   width: number,
   clip: Clip,
+  thinkingLevel?: string,
 ): string[] {
   const paint: StatusPainter = (token, text) => theme.fg(token as never, text);
   const lines: string[] = [
@@ -769,7 +784,7 @@ export function renderStatusBody(
     lines.push(statusRow("Key", "MISSING", [report.pricingNote], paint, "warning", 14));
     lines.push("");
     lines.push(paint("dim", "[Any key] Close"));
-    return frameRows(lines, width, clip, borderPainter(theme));
+    return frameRows(lines, width, clip, borderPainter(theme, thinkingLevel));
   }
 
   // One label column across models and footer rows, so every `·` lands in the same column.
@@ -799,15 +814,16 @@ export function renderStatusBody(
   lines.push(statusRow("Ready", readyLabel(report), [`${report.rows.length} models probed`], paint, readyColor(report), column));
   lines.push("");
   lines.push(paint("accent", `${report.rows.length} models`) + paint("dim", " · [Any key] Close"));
-  return frameRows(lines, width, clip, borderPainter(theme));
+  return frameRows(lines, width, clip, borderPainter(theme, thinkingLevel));
 }
 
 /** Read-only panel in the arnative rounded box; any key closes. The TUI import is dynamic because
  *  this file's self-check (check-framing.ts) runs under plain node, where pi-tui does not resolve. */
 async function showStatusPanel(ctx: ExtensionCommandContext, report: StatusReport): Promise<void> {
   const { truncateToWidth } = await import("@earendil-works/pi-tui");
+  const thinkingLevel = ctx.thinkingLevel;
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => ({
-    render: (width: number) => renderStatusBody(report, theme, width, truncateToWidth),
+    render: (width: number) => renderStatusBody(report, theme, width, truncateToWidth, thinkingLevel),
     invalidate: () => undefined,
     handleInput: () => done(),
   }));
@@ -953,6 +969,7 @@ export function renderUsageBody(
   theme: Theme,
   width: number,
   clip: Clip,
+  thinkingLevel?: string,
 ): string[] {
   const paint: StatusPainter = (token, text) => theme.fg(token as never, text);
   const lines: string[] = [
@@ -990,15 +1007,16 @@ export function renderUsageBody(
   lines.push(statusRow("Priced", report.fullyPriced ? "FULL" : "PARTIAL", ["input/output tokens x pricing; cache tokens unpriced"], paint, report.fullyPriced ? "success" : "warning", column));
   lines.push("");
   lines.push(paint("accent", `${report.rows.length} models`) + paint("dim", " · [Any key] Close"));
-  return frameRows(lines, width, clip, borderPainter(theme));
+  return frameRows(lines, width, clip, borderPainter(theme, thinkingLevel));
 }
 
 /** Read-only panel in the arnative rounded box; any key closes. Dynamic import for the same
  *  plain-node self-check reason as showStatusPanel. */
 async function showUsagePanel(ctx: ExtensionCommandContext, report: UsageReport): Promise<void> {
   const { truncateToWidth } = await import("@earendil-works/pi-tui");
+  const thinkingLevel = ctx.thinkingLevel;
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => ({
-    render: (width: number) => renderUsageBody(report, theme, width, truncateToWidth),
+    render: (width: number) => renderUsageBody(report, theme, width, truncateToWidth, thinkingLevel),
     invalidate: () => undefined,
     handleInput: () => done(),
   }));
@@ -1122,7 +1140,7 @@ async function showMenu(ctx: ExtensionCommandContext): Promise<"status" | "usage
       truncateToWidth,
       { matches: matchesKey, up: Key.up, down: Key.down, home: Key.home, end: Key.end, enter: Key.enter, escape: Key.escape },
       done,
-      borderPainter(theme),
+      borderPainter(theme, ctx.thinkingLevel),
     );
     return {
       render: (width: number) => menu.render(width),
