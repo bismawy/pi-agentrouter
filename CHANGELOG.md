@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.7.0] - 2026-10-24
 
 ### Fixed
 - Responses-API calls (`gpt-6.1-sol`, `gpt-6-astra`) no longer send session markers (`prompt_cache_key`, `prompt_cache_retention`, `session_id`, `x-client-request-id`). The gateway binds Responses sessions to one upstream Azure resource; after a pool failover (token rate limit) that binding produced Azure's "item was created under a different Azure OpenAI resource" 400. Stateless requests survive failovers. Completions models keep their cache affinity.
