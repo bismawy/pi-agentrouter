@@ -1,6 +1,6 @@
 {
   "name": "@bismawy/pi-agentrouter",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "description": "Unified frontier models. Self-healing WAF recovery. Zero workflow interruption. GPT-6 Astra, Claude, DeepSeek and GLM under one agentrouter/ namespace.",
   "type": "module",
   "keywords": [
