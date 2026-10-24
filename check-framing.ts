@@ -313,6 +313,36 @@ const foreignSaved = structuredClone(foreign);
 hooks.get("before_provider_request")!({ payload: foreign }, { model: { provider: "openai-codex" } });
 assert.deepEqual(foreign, foreignSaved, "same model on another provider must not be modified");
 
+// SESSION_MARKER_STRIP: the gateway binds Responses-API sessions to one upstream Azure
+// resource via prompt_cache_key / session headers; after a pool failover that binding
+// produces "item was created under a different Azure OpenAI resource". Responses calls
+// must leave the markers out; completions calls keep them (their cache affinity is safe).
+{
+  const responsesCtx = { model: { provider: "agentrouter", api: "openai-responses" }, modelRegistry, ui: { notify() {} } };
+  const responsesPayload = {
+    model: "gpt-6.1-sol",
+    input: [{ role: "user", content: "hello" }],
+    store: false,
+    prompt_cache_key: "sess-1",
+  } as Record<string, unknown>;
+  await hooks.get("before_provider_request")!({ payload: responsesPayload }, responsesCtx);
+  assert.equal("prompt_cache_key" in responsesPayload, false, "responses payloads must not carry the session cache key");
+
+  const completionsPayload = { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hello" }], prompt_cache_key: "sess-1" };
+  await hooks.get("before_provider_request")!({ payload: completionsPayload }, { model: { provider: "agentrouter", api: "openai-completions" }, modelRegistry, ui: { notify() {} } });
+  assert.equal((completionsPayload as Record<string, unknown>).prompt_cache_key, "sess-1", "completions payloads keep their cache key");
+
+  const responsesHeaders: Record<string, string | null> = { session_id: "sess-1", "x-client-request-id": "sess-1", authorization: "Bearer x" };
+  hooks.get("before_provider_headers")!({ headers: responsesHeaders }, { model: { provider: "agentrouter", api: "openai-responses" } });
+  assert.equal(responsesHeaders.session_id, null, "responses calls drop the session_id header");
+  assert.equal(responsesHeaders["x-client-request-id"], null, "responses calls drop the client request id header");
+  assert.equal(responsesHeaders.authorization, "Bearer x", "auth headers are untouched");
+
+  const completionsHeaders: Record<string, string | null> = { session_id: "sess-1", "x-client-request-id": "sess-1" };
+  hooks.get("before_provider_headers")!({ headers: completionsHeaders }, { model: { provider: "agentrouter", api: "openai-completions" } });
+  assert.equal(completionsHeaders.session_id, "sess-1", "completions calls keep the session headers");
+}
+
 for (const field of ["messages", "input"]) {
   const type = field === "input" ? "input_text" : "text";
   for (const prompt of [`AGENTS.md\n\n${HEADER}\n\nMore.`, `${HEADER}\n\nrest`, "Local rules.", []]) {

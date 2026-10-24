@@ -937,9 +937,18 @@ export default function (pi: ExtensionAPI) {
   // Clone message trees, including nested tool calls, before sanitizing/redacting.
   pi.on("before_provider_request", async (event, ctx) => {
     if (!event.payload) return;
-    const model = ctx.model as { provider?: string; baseUrl?: string } | undefined;
+    const model = ctx.model as { provider?: string; baseUrl?: string; api?: string } | undefined;
     if (!isAgentRouterCall(event.payload, model?.provider, model?.baseUrl)) return;
     const payload = event.payload as Record<string, unknown>;
+    // The gateway binds Responses-API sessions to ONE upstream Azure resource via
+    // prompt_cache_key; when its pool fails over (token rate limit) the follow-up call
+    // lands on another resource and Azure rejects the session-bound state ("item was
+    // created under a different Azure OpenAI resource"). The Responses models ride
+    // AgentRouter at zero cost, so dropping the cache key buys statelessness for free.
+    if (model?.api === "openai-responses") {
+      delete payload.prompt_cache_key;
+      delete payload.prompt_cache_retention;
+    }
     if (Array.isArray(payload.messages)) payload.messages = structuredClone(payload.messages);
     if (Array.isArray(payload.input)) payload.input = structuredClone(payload.input);
     if (Array.isArray(payload.system)) payload.system = structuredClone(payload.system);
@@ -950,6 +959,15 @@ export default function (pi: ExtensionAPI) {
     // framed — and framed with the reply-in-Indonesian preamble variant.
     await applyTranslation(payload, ctx as TranslatorContext);
     patchAgentRouterPayload(payload);
+  });
+
+  // Same session markers as above, in header form: null deletes them from the request.
+  pi.on("before_provider_headers", (event, ctx) => {
+    const model = ctx.model as { provider?: string; api?: string } | undefined;
+    if (!model?.provider?.toLowerCase().includes("agentrouter")) return;
+    if (model.api !== "openai-responses") return;
+    event.headers["session_id"] = null;
+    event.headers["x-client-request-id"] = null;
   });
 
   pi.on("message_end", (event, ctx) => {
