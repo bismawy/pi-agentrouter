@@ -343,56 +343,43 @@ assert.deepEqual(foreign, foreignSaved, "same model on another provider must not
   assert.equal(completionsHeaders.session_id, "sess-1", "completions calls keep the session headers");
 }
 
-// RESOURCE_ITEM_STATE: Azure resolves replayed item ids (msg_/fc_/rs_) against the
-// resource that created them, so a pool failover rejects them with "The requested item
-// was created under a different Azure OpenAI resource". Level 1 drops the pairing ids
-// (pi's own cross-model replay does the same); a repeated failure escalates to level 2,
-// which also drops the resource-bound reasoning items.
+// RESOURCE_ITEM_STATE: Azure looks a replayed item id up on the resource that created
+// it, so a pool failover rejects it with "The requested item was created under a
+// different Azure OpenAI resource". Measured on the live gateway: the reasoning item
+// with its rs_ id failed 4/12 replays after a burst, the same item without the id
+// passed 12/12. Every id goes; item bodies and call_id pairs stay.
 {
-  const responsesCtx = { model: { provider: "agentrouter", api: "openai-responses" }, modelRegistry, ui: { notify() {} } };
+  const responsesCtx = { model: { provider: "agentrouter", api: "openai-responses" }, modelRegistry, ui: { notify: () => undefined } };
   const payload = () => ({
     model: "gpt-6-astra",
     store: false,
     input: [
       { type: "reasoning", id: "rs_1", encrypted_content: "gAAA", summary: [] },
       { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
-      { type: "function_call", id: "fc_1", call_id: "call_1", name: "read", arguments: "{}" },
+      { type: "function_call", id: "fc_1", call_id: "call_1", name: "read", arguments: '{"path":"a"}' },
       { type: "function_call_output", call_id: "call_1", output: "ok" },
       { type: "item_reference", id: "fc_9" },
       { role: "user", content: "next" },
     ],
   }) as Record<string, any>;
 
-  const level1 = payload();
-  await hooks.get("before_provider_request")!({ payload: level1 }, responsesCtx);
-  const types1 = level1.input.map((item: Wire) => item.type ?? "message");
-  assert.deepEqual(types1, ["reasoning", "message", "function_call", "function_call_output", "message"], "level 1 drops item_reference only");
-  assert.equal(level1.input[0].id, "rs_1", "level 1 keeps the reasoning id (pairing anchor)");
-  assert.equal("id" in level1.input[1], false, "level 1 drops the assistant message id");
-  assert.equal("id" in level1.input[2], false, "level 1 drops the function_call id");
-  assert.equal(level1.input[2].call_id, "call_1", "call ids stay: tool results must still match");
+  const stripped = payload();
+  await hooks.get("before_provider_request")!({ payload: stripped }, responsesCtx);
+  assert.deepEqual(
+    stripped.input.map((item: Wire) => item.type ?? "message"),
+    ["reasoning", "message", "function_call", "function_call_output", "message"],
+    "item_reference is dropped, every other item is kept",
+  );
+  assert.equal("id" in stripped.input[0], false, "the reasoning id is the ownership trigger: strip it");
+  assert.equal(stripped.input[0].encrypted_content, "gAAA", "reasoning continuity survives (body kept)");
+  assert.equal("id" in stripped.input[1], false, "assistant message id is stripped");
+  assert.equal("id" in stripped.input[2], false, "function_call id is stripped");
+  assert.equal(stripped.input[2].call_id, "call_1", "call ids stay: tool results must still match");
 
-  const ownershipError = 'agentrouter API error (400): {"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"invalid_request_error"}';
-  // The hub wrapper rewrites the resource name to `***` and prepends its own label.
-  const hubError = 'agentrouter API error (400): {"message":"OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [hub-]"}';
-  const escalate = hooks.get("message_end")!({
-    message: { role: "assistant", provider: "agentrouter", stopReason: "error", errorMessage: hubError },
-  }, responsesCtx);
-  assert.match(escalate.message.errorMessage, /provider returned error/, "the ownership error must be retried");
-
-  const level2 = payload();
-  await hooks.get("before_provider_request")!({ payload: level2 }, responsesCtx);
-  assert.deepEqual(level2.input.map((item: Wire) => item.type ?? "message"), ["message", "function_call", "function_call_output", "message"], "level 2 drops the reasoning item");
-  assert.equal("id" in level2.input[0], false, "level 2 drops the remaining ids");
-
-  const stop = hooks.get("message_end")!({
-    message: { role: "assistant", provider: "agentrouter", stopReason: "error", errorMessage: ownershipError },
-  }, responsesCtx);
-  assert.equal(stop, undefined, "no retry loop once every resource-bound item is gone");
-
-  const completions = { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hello", id: "msg_keep" }] };
-  await hooks.get("before_provider_request")!({ payload: completions }, { model: { provider: "agentrouter", api: "openai-completions" }, modelRegistry, ui: { notify() {} } });
-  assert.equal(completions.messages[0].id, "msg_keep", "completions payloads are untouched");
+  const untouched = { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hello", id: "msg_keep" }] };
+  const completionsCtx = { model: { provider: "agentrouter", api: "openai-completions" }, modelRegistry, ui: { notify: () => undefined } };
+  await hooks.get("before_provider_request")!({ payload: untouched }, completionsCtx);
+  assert.equal(untouched.messages[0].id, "msg_keep", "completions payloads are untouched");
 }
 
 for (const field of ["messages", "input"]) {

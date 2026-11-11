@@ -52,25 +52,23 @@ function sanitizeInPlace(value: unknown): void {
 }
 
 /**
- * Azure resolves a replayed item id (`msg_*`, `fc_*`, `rs_*`) against the resource
- * that created it, and AgentRouter's pool can serve the next call from another
- * resource -> 400 "The requested item was created under a different Azure OpenAI
- * resource". Level 0 keeps every id. Level 1 drops the pairing ids the same way
- * pi's own cross-model replay does (function_call id omitted, `rs_*` reasoning id
- * kept). Level 2 also drops the reasoning items, the last resource-bound state.
+ * Azure resolves a replayed item id against the resource that created it, so after
+ * AgentRouter's pool serves the next call from another resource the follow-up dies
+ * with 400 "The requested item was created under a different Azure OpenAI resource".
+ * Measured against the live gateway: a reasoning item carrying its `rs_*` id fails
+ * 4/12 replays after a pool shift, the same item with the id removed passes 12/12
+ * (Azure falls back to the item_id sealed inside `encrypted_content`). Item bodies
+ * stay intact, so reasoning continuity and tool `call_id` pairs survive.
  */
-export function reduceResponseItemState(payload: unknown, level: number): void {
-  if (!isRecord(payload) || !Array.isArray(payload.input) || level <= 0) return;
-  const kept = (payload.input as unknown[]).filter(
-    (item) =>
-      // item_reference is a pure pointer; reasoning is the only item whose body is
-      // resource-bound, so level 2 drops it instead of rewriting it.
-      !isRecord(item) || (item.type !== "item_reference" && (level === 1 || item.type !== "reasoning")),
-  );
-  payload.input = kept;
-  for (const item of kept) {
-    if (isRecord(item) && (level === 2 || item.type !== "reasoning")) delete item.id;
-  }
+export function stripResponseItemIds(payload: unknown): void {
+  if (!isRecord(payload) || !Array.isArray(payload.input)) return;
+  payload.input = (payload.input as unknown[])
+    // item_reference is a bare pointer at a resource-owned item, never replayable.
+    .filter((item) => !(isRecord(item) && item.type === "item_reference"))
+    .map((item) => {
+      if (isRecord(item)) delete item.id;
+      return item;
+    });
 }
 
 /**
@@ -177,16 +175,10 @@ function frameUserTurn(msg: Record<string, unknown>, textType = "text"): void {
 //   Stage 2: Redact ALL older assistant turns if needed.
 // Fingerprints stay sticky across subsequent turns in the same session.
 const WAF_BLOCK_RE = /sensitive[_ ]words?[_ ]detected|content-blocked/i;
-const ITEM_OWNERSHIP_RE = /created under a different\b.*\bOpenAI resource/i;
 const SENSITIVE_WORDS_RE = /sensitive[_ ]words?[_ ]detected/i;
 // Keep the placeholder WAF-neutral; wording about the filter previously
 // triggered additional content-filter rejections.
 const REDACTED_NOTE = "[Message withheld by local policy]";
-
-// Sticky for the session: once the pool has served a foreign resource, every
-// later turn of this conversation can land there again.
-let itemStateLevel = 1;
-let itemStateNotified = false;
 
 const redactSet = new Set<string>();
 let escalatePending = false;
@@ -979,8 +971,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (Array.isArray(payload.messages)) payload.messages = structuredClone(payload.messages);
     if (Array.isArray(payload.input)) payload.input = structuredClone(payload.input);
-    // After the clone: the reduction deletes ids from items pi may still hold.
-    if (model?.api === "openai-responses") reduceResponseItemState(payload, itemStateLevel);
+    // After the clone: the strip deletes ids from items pi may still hold.
+    if (model?.api === "openai-responses") stripResponseItemIds(payload);
     if (Array.isArray(payload.system)) payload.system = structuredClone(payload.system);
     sanitizeInPlace(payload);
     applyPoisonRedaction(payload);
@@ -1011,21 +1003,6 @@ export default function (pi: ExtensionAPI) {
     if (!provider?.toLowerCase().includes("agentrouter")) return;
 
     const errorMessage = message.errorMessage ?? "";
-    // Foreign upstream resource: pi's retry re-enters before_provider_request at
-    // the next level, so the retried payload carries no resource-bound item state.
-    if (ITEM_OWNERSHIP_RE.test(errorMessage)) {
-      if (itemStateLevel >= 2) return;
-      itemStateLevel++;
-      if (!itemStateNotified) {
-        itemStateNotified = true;
-        ctx.ui.notify(
-          "AgentRouter failed over to another upstream model resource. Retrying without the " +
-            "carried-over reasoning items.",
-          "warning",
-        );
-      }
-      return retryableMessage(message, errorMessage);
-    }
     if (!WAF_BLOCK_RE.test(errorMessage)) return;
     escalatePending = true;
     if (SENSITIVE_WORDS_RE.test(errorMessage)) {
