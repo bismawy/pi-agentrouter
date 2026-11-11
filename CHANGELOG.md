@@ -1,9 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [1.7.1] - 2026-11-11
 
 ### Fixed
-- Responses-API calls (`gpt-6-astra`, `gpt-6.1-sol`) no longer replay item ids that Azure resolves against the resource that created them. A pooled failover served the follow-up call from another upstream resource and answered `400 The requested item was created under a different Azure OpenAI resource`. Measured on the live gateway: a reasoning item replayed with its `rs_` id failed 4 of 12 attempts after a burst, and the same item with the id removed passed 12 of 12. Payloads now drop every item `id` (plus `item_reference` pointers) and keep the item bodies, so reasoning continuity and tool `call_id` pairs survive. Supersedes the id-level handling of 1.7.1, which had kept the reasoning id and fell back to dropping the whole reasoning item. Completions models are unaffected.
+- Responses-API calls (`gpt-6-astra`, `gpt-6.1-sol`) no longer replay item ids that Azure resolves against the resource that created them. A pooled failover served the follow-up call from another upstream resource and answered `400 The requested item was created under a different Azure OpenAI resource`. Measured on the live gateway: a reasoning item replayed with its `rs_` id failed 4 of 12 attempts after a burst, and the same item with the id removed passed 12 of 12. Payloads now drop every item `id` (plus `item_reference` pointers) and keep the item bodies, so reasoning continuity and tool `call_id` pairs survive. Completions models are unaffected.
 
 ## [1.7.0] - 2026-10-24
 
