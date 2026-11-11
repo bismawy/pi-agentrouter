@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Responses-API calls (`gpt-6-astra`, `gpt-6.1-sol`) no longer replay item ids that belong to a previous upstream Azure resource. Azure resolves every replayed `msg_*` / `fc_*` / `rs_*` id against the resource that created it, so a pool failover answered the follow-up call with `400 The requested item was created under a different Azure OpenAI resource`. Pairing ids are now dropped on every call, and a repeated failure escalates once more by dropping the carried-over reasoning items; requests that already ran at the escalated level stay there for the session. Tool `call_id`s are untouched, so tool results still match. Completions models are unaffected.
+
 ## [1.7.0] - 2026-10-24
 
 ### Fixed
